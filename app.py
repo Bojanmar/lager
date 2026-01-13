@@ -17,6 +17,7 @@ st.title("📦 Obračun zaliha – Laser Lux")
 st.sidebar.header("Ulazni podaci")
 lager_file = st.sidebar.file_uploader("Lager Excel (ULAZ)", type=["xlsx"])
 fakture_file = st.sidebar.file_uploader("Fakture Excel (IZLAZ)", type=["xlsx"])
+stvarno_file = st.sidebar.file_uploader("Stvarno stanje magacina (POPIS)", type=["xlsx"])
 st.sidebar.markdown("---")
 
 # ============================
@@ -60,14 +61,14 @@ if run_calc:
     if not lager_file or not fakture_file:
         st.error("❌ Morate da uploadujete **oba** Excel fajla (lager i fakture).")
     else:
-        # uzmi trenutno sačuvana pravila (ne nužno ono što je u editoru ako nije kliknuto Save)
         rules_df_for_run = st.session_state.get("rules_df", edited_rules_df)
 
         with st.spinner("Računam, molim sačekaj..."):
             uporedba, ekstremni, df_fakture_posle, rules_used_df = procesiraj_obracun(
                 lager_file,
                 fakture_file,
-                edited_rules_df=rules_df_for_run
+                edited_rules_df=rules_df_for_run,
+                stvarno_file=stvarno_file
             )
 
         st.success("✔ Obračun je završen.")
@@ -76,15 +77,46 @@ if run_calc:
             ["📌 Koeficijenti i uporedba", "⚠ Ekstremi", "📄 Fakture – obračun", "🧮 Pravila konverzije"]
         )
 
+        # ✅ Tab 1: samo kolone koje želiš
         with tab1:
-            st.subheader("Koeficijenti i uporedba (lager vs potrošnja)")
-            st.dataframe(uporedba, use_container_width=True)
+            st.subheader("Uporedba (potrošnja, lager, popis)")
 
+            cols = [
+                "Materijal",
+                "Ukupna_potrošnja",
+                "Stanje_na_lageru",
+                "Razlika_pre",
+                "Stanje_na_magacinu",
+                "Koef_popis",
+                "Finalna_potrošnja",
+            ]
+            show_df = uporedba.copy()
+            for c in cols:
+                if c not in show_df.columns:
+                    show_df[c] = pd.NA
+
+            st.dataframe(show_df[cols], use_container_width=True)
+
+        # ✅ Tab 2: ekstremi + iste kolone
         with tab2:
-            st.subheader("Ekstremne vrednosti (pregled potrošnje)")
-            cols_to_show = ["Materijal", "Ukupna_potrošnja", "Stanje_na_lageru", "Razlika_pre"]
-            df_show = ekstremni[cols_to_show].copy() if not ekstremni.empty else ekstremni
-            st.dataframe(df_show, use_container_width=True)
+            st.subheader("Ekstremne vrednosti (pregled)")
+            cols = [
+                "Materijal",
+                "Ukupna_potrošnja",
+                "Stanje_na_lageru",
+                "Razlika_pre",
+                "Stanje_na_magacinu",
+                "Koef_popis",
+                "Finalna_potrošnja",
+            ]
+            if ekstremni is None or ekstremni.empty:
+                st.info("Nema ekstremnih vrednosti po trenutno zadatim granicama.")
+            else:
+                tmp = ekstremni.copy()
+                for c in cols:
+                    if c not in tmp.columns:
+                        tmp[c] = pd.NA
+                st.dataframe(tmp[cols], use_container_width=True)
 
         with tab3:
             st.subheader("Fakture – obračun količina za skidanje sa lagera")
@@ -96,7 +128,9 @@ if run_calc:
 
         # --- chart ---
         st.markdown("---")
-        st.subheader("📊 Poređenje stanja na lageru i ukupne potrošnje po materijalu")
+        st.subheader("📊 Poređenje stanja na lageru i potrošnje po materijalu")
+
+        use_final = st.checkbox("Koristi FINALNU potrošnju (po popisu)", value=True)
 
         chart_df = uporedba.dropna(subset=["Materijal", "Stanje_na_lageru", "Ukupna_potrošnja"]).copy()
         if len(chart_df) > 0:
@@ -107,15 +141,20 @@ if run_calc:
                 value=min(30, len(chart_df)),
                 step=1
             )
-            chart_df["Abs_diff"] = (chart_df["Stanje_na_lageru"] - chart_df["Ukupna_potrošnja"]).abs()
+
+            y_col = "Ukupna_potrošnja"
+            if use_final and "Finalna_potrošnja" in chart_df.columns and chart_df["Finalna_potrošnja"].notna().any():
+                y_col = "Finalna_potrošnja"
+
+            chart_df["Abs_diff"] = (chart_df["Stanje_na_lageru"] - chart_df[y_col]).abs()
             chart_df = chart_df.sort_values("Abs_diff", ascending=False).head(max_items)
 
             fig = px.bar(
                 chart_df,
                 x="Materijal",
-                y=["Stanje_na_lageru", "Ukupna_potrošnja"],
+                y=["Stanje_na_lageru", y_col],
                 barmode="group",
-                title="Stanje na lageru vs ukupna potrošnja",
+                title=f"Stanje na lageru vs {y_col}",
             )
             fig.update_layout(xaxis_tickangle=45, height=650, legend_title_text="Količina")
             st.plotly_chart(fig, use_container_width=True)

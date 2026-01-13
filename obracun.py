@@ -55,7 +55,6 @@ def _attach_meta(fn, rule_type, from_unit, to_unit, factor=None, extra=None, ena
         "extra": extra,
         "enabled": enabled
     }
-    # lep opis
     if rule_type in ("factor_per", "factor_per_len"):
         fn._rule_desc = f"{rule_type}: {factor} {to_unit}/{from_unit}"
     elif rule_type == "per_piece":
@@ -210,7 +209,7 @@ extend_rules("yapseal 106, komp b, 10kg", [rule_factor_per("m2", "kg", 1.75)])
 # ======================================================
 
 PB2K_DENSITY_KG_PER_L = 1.15
-PB2K_LIT_PER_M2 = round(2.4 / PB2K_DENSITY_KG_PER_L, 3)  # ≈ 2.087
+PB2K_LIT_PER_M2 = round(2.4 / PB2K_DENSITY_KG_PER_L, 3)
 
 ME508_3x25m_ROLL_LENGTH_M = 25
 ME508_4x50m_ROLL_LENGTH_M = 50
@@ -313,7 +312,6 @@ material_rules[_dual_par_key] = [
 def _n(s): return norm_text(s)
 
 INJEKT_TRIGGER = _n("Injektiranje aktivnih prodora")
-
 INJEKT_RECEPT_DEFAULT = {_n("ALU Packer 10/100 mm, kom"): (1.0, "kom")}
 
 INJEKT_RECEPT_BY_RACUN = {
@@ -469,7 +467,7 @@ def calc_skidanje(row, broj_pakera_map, rules_dict):
 
 
 # ======================================================
-# 9) Koeficijenti – analiza uporedbe
+# 9) Koeficijenti – analiza uporedbe (tvoj postojeći)
 # ======================================================
 
 def _n2(s):
@@ -504,7 +502,7 @@ def _calc_coef(row):
 
 
 # ======================================================
-# 10) RULES <-> DF (za pravi editor)
+# 10) RULES <-> DF (za editor)
 # ======================================================
 
 RULE_TYPES = [
@@ -522,7 +520,7 @@ RULE_TYPES = [
 def rules_to_df(rules_dict):
     rows = []
     for mat, rules in rules_dict.items():
-        for idx, r in enumerate(rules, start=1):
+        for r in rules:
             meta = getattr(r, "_meta", None)
             if not meta:
                 rows.append({
@@ -576,7 +574,6 @@ def make_rule_from_row(row):
     else:
         return None
 
-    # override enabled
     fn._meta["enabled"] = enabled
     return fn
 
@@ -588,9 +585,9 @@ def apply_rules_df(base_rules_dict, edited_df):
     df = edited_df.copy()
     for c in ["Materijal", "rule_type", "from_unit", "to_unit"]:
         df[c] = df[c].fillna("").astype(str)
+
     df["enabled"] = df["enabled"].fillna(True).astype(bool)
     df["extra"] = pd.to_numeric(df["extra"], errors="coerce").fillna(0.0)
-    # factor može biti NaN za identity
     if "factor" in df.columns:
         df["factor"] = pd.to_numeric(df["factor"], errors="coerce")
 
@@ -603,7 +600,6 @@ def apply_rules_df(base_rules_dict, edited_df):
                 rules.append(fn)
         out[mat] = rules
 
-    # zadrži materijale koji nisu u df (ako ih ima)
     for mat, rules in base_rules_dict.items():
         if mat not in out:
             out[mat] = rules[:]
@@ -611,13 +607,42 @@ def apply_rules_df(base_rules_dict, edited_df):
 
 
 # ======================================================
-# 11) Glavna funkcija – procesiraj_obracun
+# 11) POPIS PARSER (stvarno stanje magacina)
 # ======================================================
 
-def procesiraj_obracun(lager_file, fakture_file, edited_rules_df=None):
+def parse_stvarno_stanje_excel(stvarno_file, value_row_idx=1):
     """
-    Prima dva upload-ovana fajla (BytesIO) i opciono edited_rules_df.
-    Vraća: uporedba, ekstremni, df_fakture_posle, rules_used_df
+    Očekivan format:
+      - kolone = materijali
+      - red 0 = jedinica
+      - red 1 = količina (stvarno stanje)
+
+    Vraća df: [Materijal, Stanje_na_magacinu]
+    """
+    df = pd.read_excel(stvarno_file)
+    stanje = df.iloc[value_row_idx].to_frame().reset_index()
+    stanje.columns = ["Materijal", "Stanje_na_magacinu"]
+    stanje["Stanje_na_magacinu"] = pd.to_numeric(stanje["Stanje_na_magacinu"], errors="coerce")
+    return stanje
+
+
+# ======================================================
+# 12) Glavna funkcija – procesiraj_obracun (+ POPIS)
+# ======================================================
+
+def procesiraj_obracun(lager_file, fakture_file, edited_rules_df=None, stvarno_file=None):
+    """
+    Prima:
+      - lager_file (ULAZ)
+      - fakture_file (IZLAZ)
+      - edited_rules_df (opciono)
+      - stvarno_file (POPIS / stvarno stanje magacina - opciono)
+
+    Vraća:
+      - uporedba
+      - ekstremni
+      - df_fakture_posle
+      - rules_used_df
     """
     df_uvoz = pd.read_excel(lager_file)
     df_fakture = pd.read_excel(fakture_file)
@@ -651,7 +676,7 @@ def procesiraj_obracun(lager_file, fakture_file, edited_rules_df=None):
     )
     neuspeh_pre = df_pre[df_pre["Količina za skidanje sa lagera"].isna()].copy()
 
-    # 5) heuristike (bazirano na rules_dict, ne global)
+    # 5) heuristike (bazirano na rules_dict)
     rules_all = {k: v[:] for k, v in rules_dict.items()}
     for _, r in neuspeh_pre[["Materijal", "Jedinica mere za fakturisanje", "Jedinica mere za lager - skidanje količine"]].drop_duplicates().iterrows():
         rr = make_heur_rule(r["Jedinica mere za fakturisanje"], r["Jedinica mere za lager - skidanje količine"])
@@ -665,7 +690,7 @@ def procesiraj_obracun(lager_file, fakture_file, edited_rules_df=None):
         axis=1
     )
 
-    # 7) PB2K spec m2/m -> lit (i dalje ostaje)
+    # 7) PB2K spec m2/m -> lit
     PB2K_NAME_NORM = norm_text("HYPERDESMO PB 2K A+B, 20+20lit")
     materijal_norm = df_posle["Materijal"].map(norm_text)
     jm_fakt_norm = df_posle["Jedinica mere za fakturisanje"].map(norm_unit)
@@ -704,7 +729,32 @@ def procesiraj_obracun(lager_file, fakture_file, edited_rules_df=None):
     uporedba = pd.merge(potrosnja, lager_stanje, on="Materijal", how="outer")
     uporedba["Razlika_pre"] = uporedba["Stanje_na_lageru"] - uporedba["Ukupna_potrošnja"]
 
+    # (tvoj postojeći dijagnostički koef)
     uporedba[["Koeficijent", "Coef_min", "Coef_max", "Flex", "Napomena_coef"]] = uporedba.apply(_calc_coef, axis=1)
+
+    # ======================================================
+    # 9) POPIS -> Koef_popis + Finalna_potrošnja
+    # ======================================================
+    if stvarno_file is not None:
+        df_stvarno = parse_stvarno_stanje_excel(stvarno_file, value_row_idx=1)
+        uporedba = uporedba.merge(df_stvarno, on="Materijal", how="left")
+
+        # Koef_popis = knjigovodstvo / stvarno
+        uporedba["Koef_popis"] = np.where(
+            (uporedba["Stanje_na_magacinu"].notna()) &
+            (uporedba["Stanje_na_magacinu"] > 0) &
+            (uporedba["Stanje_na_lageru"].notna()),
+            uporedba["Stanje_na_lageru"] / uporedba["Stanje_na_magacinu"],
+            np.nan
+        )
+
+        uporedba["Finalna_potrošnja"] = uporedba["Ukupna_potrošnja"] * uporedba["Koef_popis"]
+    else:
+        uporedba["Stanje_na_magacinu"] = np.nan
+        uporedba["Koef_popis"] = np.nan
+        uporedba["Finalna_potrošnja"] = np.nan
+
+    # ekstremi (po Napomena_coef, ali sa novim kolonama)
     ekstremni = uporedba[uporedba["Napomena_coef"].str.contains("EKSTREMNO", na=False)].copy()
 
     # pregled pravila koja su korišćena (za tab)
@@ -714,7 +764,7 @@ def procesiraj_obracun(lager_file, fakture_file, edited_rules_df=None):
 
 
 # ======================================================
-# 12) Pregled pravila – (read-only)
+# 13) Pregled pravila – (read-only)
 # ======================================================
 
 def get_rules_overview():
@@ -727,7 +777,7 @@ def get_rules_overview():
 
 
 # ======================================================
-# 13) Export
+# 14) Export
 # ======================================================
 
 def export_to_excel(uporedba, ekstremni, df_fakture_posle):
