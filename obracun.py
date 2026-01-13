@@ -295,7 +295,7 @@ PACKER_MAT_KEY = _n("ALU Packer 10/100 mm, kom")
 # Rasponi koje si tražio:
 # - pakere: 1.0–1.4 x fakturisano
 # - smole: 0.2–3.0 x upisana potrošnja (kg)  => -80% do +200%
-PACKER_MULT_MIN, PACKER_MULT_MAX = 1.0, 1.4
+PACKER_MULT_MIN, PACKER_MULT_MAX = 1.0, 1.8
 RESIN_MULT_MIN, RESIN_MULT_MAX = 0.2, 3.0
 
 def _broj_pakera_po_setu(df):
