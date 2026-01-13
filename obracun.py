@@ -152,7 +152,7 @@ def canon_mat(name: str) -> str:
     k = norm_text(name)
     return ALIASES.get(k, k)
 
-# --- osnovna pravila ---
+# --- osnovna pravila (bazna) ---
 extend_rules("alchimica aqua smart dur 2k", [rule_factor_per("m2", "kg", 0.20)])
 extend_rules("hyperdesmo pb 2k a+b, 20+20lit", [rule_factor_per("m2", "kg", 3)])
 extend_rules("alchimica water foam 1k lv", [rule_per_piece("kg", 0.3)])
@@ -284,13 +284,19 @@ material_rules[_dual_par_key] = [
 ]
 
 # ======================================================
-# 6) Injektiranje – (ostavljeno kako je bilo)
+# 6) Injektiranje – TRIGGER + (NOVO) kalibracija pakera/smola
 # ======================================================
 
 def _n(s): return norm_text(s)
+
 INJEKT_TRIGGER = _n("Injektiranje aktivnih prodora")
-INJEKT_RECEPT_DEFAULT = {_n("ALU Packer 10/100 mm, kom"): (1.0, "kom")}
-INJEKT_RECEPT_BY_RACUN = {}  # (skrati ovde; ostavi svoj komplet ako koristiš)
+PACKER_MAT_KEY = _n("ALU Packer 10/100 mm, kom")
+
+# Rasponi koje si tražio:
+# - pakere: 1.0–1.4 x fakturisano
+# - smole: 0.2–3.0 x upisana potrošnja (kg)  => -80% do +200%
+PACKER_MULT_MIN, PACKER_MULT_MAX = 1.0, 1.4
+RESIN_MULT_MIN, RESIN_MULT_MAX = 0.2, 3.0
 
 def _broj_pakera_po_setu(df):
     brojevi = {}
@@ -298,7 +304,7 @@ def _broj_pakera_po_setu(df):
         g = grp.copy()
         g["_mat_norm"] = g["Materijal"].map(_n)
         g["_jm_norm"] = g["Jedinica mere za fakturisanje"].map(norm_unit)
-        alu_mask = g["_mat_norm"].eq(_n("ALU Packer 10/100 mm, kom"))
+        alu_mask = g["_mat_norm"].eq(PACKER_MAT_KEY)
         if alu_mask.any():
             base = pd.to_numeric(g.loc[alu_mask, "Količina za fakturisanje"], errors="coerce").max()
         else:
@@ -307,20 +313,10 @@ def _broj_pakera_po_setu(df):
     return brojevi
 
 def _override_injekt(row, mat_norm, uf_norm, ul_norm, broj_pakera_map):
+    # ostavljeno prazno: smole su sada već u kg u fakturama i kalibrišu se posle
     tip = row.get("Pozicija za fakturisanje - tip hidroizolacije")
     if pd.isna(tip) or INJEKT_TRIGGER not in _n(tip):
         return None, None
-    racun = _n(row.get("Broj računa"))
-    base = broj_pakera_map.get(racun)
-    if base is None or base == 0:
-        return None, None
-    rec = INJEKT_RECEPT_BY_RACUN.get(racun, {})
-    if mat_norm in rec:
-        faktor, out_u = rec[mat_norm]
-        return base * faktor, f"recipe_injekt[{row.get('Broj računa')}]: {faktor} {out_u}/packer"
-    if mat_norm in INJEKT_RECEPT_DEFAULT:
-        faktor, out_u = INJEKT_RECEPT_DEFAULT[mat_norm]
-        return base * faktor, f"recipe_injekt_default: {faktor} {out_u}/packer"
     return None, None
 
 def _override_sanacija(row, mat, uf, ul):
@@ -482,7 +478,6 @@ def read_wide_stock_excel(xlsx_file, label="stanje"):
     Vraća long DF: Materijal, Jedinica, <label>
     """
     df = pd.read_excel(xlsx_file)
-    # jedinice i stanje su u prva 2 reda
     units = df.iloc[0].to_dict()
     values = df.iloc[1].to_dict()
 
@@ -496,27 +491,201 @@ def read_wide_stock_excel(xlsx_file, label="stanje"):
     return out
 
 # ======================================================
-# 10) Glavna funkcija – procesiraj_obracun (sa magacinom)
+# 10) Injekt kalibracija: pakeri (1.0–1.4) + smole (0.2–3.0)
+# ======================================================
+
+def _distribute_with_caps(base_vals, target_sum, min_mult, max_mult):
+    """
+    base_vals: Series (>=0)
+    vraća Series multiplikatora u [min_mult,max_mult] tako da
+    sum(base*mult) ~= target_sum (koliko god je moguće).
+    """
+    base = base_vals.fillna(0).astype(float).clip(lower=0.0)
+    if base.sum() <= 0 or pd.isna(target_sum):
+        return pd.Series(index=base.index, data=np.nan)
+
+    mult = pd.Series(index=base.index, data=min_mult, dtype=float)
+    cur = float((base * mult).sum())
+    target = float(target_sum)
+
+    if target <= cur:
+        return mult
+
+    need = target - cur
+    cap_add = base * (max_mult - min_mult)
+    cap_total = float(cap_add.sum())
+    if cap_total <= 0:
+        return mult
+
+    if need >= cap_total:
+        return pd.Series(index=base.index, data=max_mult, dtype=float)
+
+    add = cap_add * (need / cap_total)
+    add = add.clip(lower=0.0, upper=cap_add)
+    mult = (min_mult + (add / base.replace(0, np.nan))).fillna(min_mult)
+    mult = mult.clip(lower=min_mult, upper=max_mult)
+
+    for _ in range(6):
+        cur = float((base * mult).sum())
+        err = target - cur
+        if abs(err) < 1e-6:
+            break
+        if err > 0:
+            free = (mult < max_mult) & (base > 0)
+            if not free.any(): break
+            cap = (base[free] * (max_mult - mult[free])).sum()
+            if cap <= 0: break
+            delta = base[free] * (err / cap)
+            mult.loc[free] = (mult.loc[free] + delta).clip(upper=max_mult)
+        else:
+            free = (mult > min_mult) & (base > 0)
+            if not free.any(): break
+            cap = (base[free] * (mult[free] - min_mult)).sum()
+            if cap <= 0: break
+            delta = base[free] * ((-err) / cap)
+            mult.loc[free] = (mult.loc[free] - delta).clip(lower=min_mult)
+
+    return mult
+
+def apply_injekt_packers_and_resins(df_posle, lager_long, mag_long=None):
+    """
+    Modifikuje df_posle:
+      - za pakere u injekt računima: primeni 'stvarni_pakeri' (1.0–1.4x)
+      - za smole u injekt računima (kg): skalira po materijalu ka targetu (lager-magacin)
+        uz per-račun multiplikator 0.2–3.0 oko upisanih kg.
+    Vraća: injekt_debug_df
+    """
+    df = df_posle.copy()
+
+    if mag_long is None:
+        return df, pd.DataFrame()
+
+    stock = pd.merge(
+        lager_long[["Materijal_key", "Stanje_na_lageru"]],
+        mag_long[["Materijal_key", "Stanje_na_magacinu"]],
+        on="Materijal_key",
+        how="left"
+    )
+    stock["Target_potrosnja"] = stock["Stanje_na_lageru"] - stock["Stanje_na_magacinu"]
+
+    tip = df["Pozicija za fakturisanje - tip hidroizolacije"]
+    mask_injekt = tip.fillna("").map(_n).str.contains(INJEKT_TRIGGER, na=False)
+
+    df["_racun_key"] = df["Broj računa"].map(_n)
+    df["_mat_key"] = df["Materijal"].map(_n)
+    df["_jm_lager"] = df["Jedinica mere za lager - skidanje količine"].map(norm_unit)
+
+    # --- 1) Pakere ---
+    packer_lines = mask_injekt & df["_mat_key"].eq(PACKER_MAT_KEY)
+    billed_packers = (
+        df.loc[packer_lines]
+        .groupby("_racun_key")["Količina za fakturisanje"]
+        .max()
+        .astype(float)
+    )
+
+    packer_target = stock.loc[stock["Materijal_key"].eq(PACKER_MAT_KEY), "Target_potrosnja"]
+    packer_target = float(packer_target.iloc[0]) if len(packer_target) else np.nan
+
+    if billed_packers.sum() > 0 and pd.notna(packer_target):
+        packer_mult = _distribute_with_caps(
+            billed_packers,
+            target_sum=packer_target,
+            min_mult=PACKER_MULT_MIN,
+            max_mult=PACKER_MULT_MAX
+        )
+        real_packers = (billed_packers * packer_mult).round(0)
+    else:
+        packer_mult = pd.Series(index=billed_packers.index, data=np.nan, dtype=float)
+        real_packers = billed_packers.copy()
+
+    for racun_key, rp in real_packers.items():
+        mask_r = packer_lines & df["_racun_key"].eq(racun_key)
+        if mask_r.any():
+            df.loc[mask_r, "Količina za skidanje sa lagera"] = float(rp)
+            df.loc[mask_r, "Napomena konverzije"] = (
+                "injekt_paker_kalibracija: "
+                f"fakt={float(billed_packers.loc[racun_key]):.0f} "
+                f"x {float(packer_mult.loc[racun_key]):.3f} -> {float(rp):.0f}"
+            )
+
+    # --- 2) Smole (kg) ---
+    resin_lines = mask_injekt & df["_jm_lager"].eq("kg") & (~df["_mat_key"].eq(PACKER_MAT_KEY))
+
+    df["Količina za skidanje sa lagera"] = pd.to_numeric(df["Količina za skidanje sa lagera"], errors="coerce")
+    base_by_mat_racun = (
+        df.loc[resin_lines]
+        .groupby(["_mat_key", "_racun_key"])["Količina za skidanje sa lagera"]
+        .sum(min_count=1)
+        .fillna(0.0)
+    )
+
+    resin_targets = stock.set_index("Materijal_key")["Target_potrosnja"].to_dict()
+
+    real_packers_w = real_packers.to_dict()
+    def _w(rk):
+        v = real_packers_w.get(rk, np.nan)
+        return float(v) if pd.notna(v) and v > 0 else 1.0
+
+    resin_mult_map = {}
+
+    for mat_key in base_by_mat_racun.index.get_level_values(0).unique():
+        target = resin_targets.get(mat_key, np.nan)
+        base_sr = base_by_mat_racun.loc[mat_key].copy()
+
+        if pd.isna(target) or target <= 0 or base_sr.sum() <= 0:
+            for rk in base_sr.index:
+                resin_mult_map[(mat_key, rk)] = 1.0
+            continue
+
+        weights = pd.Series({rk: _w(rk) for rk in base_sr.index}).astype(float)
+        base_for_caps = base_sr * (weights / weights.mean())
+
+        mult = _distribute_with_caps(
+            base_for_caps,
+            target_sum=target,
+            min_mult=RESIN_MULT_MIN,
+            max_mult=RESIN_MULT_MAX
+        )
+        mult = mult.clip(lower=RESIN_MULT_MIN, upper=RESIN_MULT_MAX)
+
+        for rk in base_sr.index:
+            resin_mult_map[(mat_key, rk)] = float(mult.loc[rk])
+
+    for (mat_key, racun_key), m in resin_mult_map.items():
+        mask = resin_lines & df["_mat_key"].eq(mat_key) & df["_racun_key"].eq(racun_key)
+        if not mask.any():
+            continue
+        df.loc[mask, "Količina za skidanje sa lagera"] = df.loc[mask, "Količina za skidanje sa lagera"] * m
+        df.loc[mask, "Napomena konverzije"] = df.loc[mask, "Napomena konverzije"].fillna("") + (
+            f" | injekt_smola_kalibracija x{m:.3f}"
+        )
+
+    injekt_debug = pd.DataFrame({
+        "Broj_racuna_key": billed_packers.index,
+        "Fakturisano_pakera": billed_packers.values,
+        "Koef_pakera": packer_mult.reindex(billed_packers.index).values,
+        "Realno_pakera": real_packers.reindex(billed_packers.index).values,
+    }).sort_values("Broj_racuna_key")
+
+    return df, injekt_debug
+
+# ======================================================
+# 11) Glavna funkcija – procesiraj_obracun (sa magacinom)
 # ======================================================
 
 def procesiraj_obracun(lager_file, fakture_file, magacin_file=None, edited_rules_df=None):
     """
     Vraća:
-      - uporedba (sa magacinom + koef_novi + finalna_potrošnja)
-      - ekstremni (stari koef na lager/potrošnja)
-      - df_posle (fakture posle konverzije)
+      - uporedba
+      - df_posle (fakture posle konverzije + injekt kalibracija)
       - rules_used_df
-      - kalibracija_ekstremi (gde Koef_novi puno odskače)
+      - kalibracija_ekstremi
+      - injekt_debug
     """
     df_fakture = pd.read_excel(fakture_file)
 
-    # lager ulaz (wide)
     lager_long = read_wide_stock_excel(lager_file, label="Stanje_na_lageru")
-    # mapa jedinica za skidanje (iz lager file, red 0)
-    mapa_jedinica = {c: pd.read_excel(lager_file).iloc[0][c] for c in pd.read_excel(lager_file).columns}
-    # (bolje: iz lager_long, ali ovo ti je kompatibilno)
-
-    # pravila
     rules_dict = apply_rules_df(material_rules, edited_rules_df)
 
     # 1) mapiranje JM iz lagera na fakture
@@ -534,10 +703,9 @@ def procesiraj_obracun(lager_file, fakture_file, magacin_file=None, edited_rules
     mask_me4 = df_fakture["Materijal"].map(norm_text).eq(me508_4)
     df_fakture.loc[mask_me3 | mask_me4, "Jedinica mere za lager - skidanje količine"] = "kom"
 
-    # 3) injekt map
     broj_pakera_map = _broj_pakera_po_setu(df_fakture)
 
-    # 4) prvi prolaz
+    # 3) prvi prolaz
     df_pre = df_fakture.copy()
     df_pre[["Količina za skidanje sa lagera", "Napomena konverzije"]] = df_pre.apply(
         lambda row: calc_skidanje(row, broj_pakera_map, rules_dict),
@@ -545,21 +713,21 @@ def procesiraj_obracun(lager_file, fakture_file, magacin_file=None, edited_rules
     )
     neuspeh_pre = df_pre[df_pre["Količina za skidanje sa lagera"].isna()].copy()
 
-    # 5) heuristike
+    # 4) heuristike
     rules_all = {k: v[:] for k, v in rules_dict.items()}
     for _, r in neuspeh_pre[["Materijal", "Jedinica mere za fakturisanje", "Jedinica mere za lager - skidanje količine"]].drop_duplicates().iterrows():
         rr = make_heur_rule(r["Jedinica mere za fakturisanje"], r["Jedinica mere za lager - skidanje količine"])
         if rr is not None:
             rules_all.setdefault(canon_mat(r["Materijal"]), []).append(rr)
 
-    # 6) drugi prolaz
+    # 5) drugi prolaz
     df_posle = df_fakture.copy()
     df_posle[["Količina za skidanje sa lagera", "Napomena konverzije"]] = df_posle.apply(
         lambda row: calc_skidanje(row, broj_pakera_map, rules_all),
         axis=1
     )
 
-    # 7) PB2K spec m2/m -> lit
+    # 6) PB2K spec
     PB2K_NAME_NORM = norm_text("HYPERDESMO PB 2K A+B, 20+20lit")
     materijal_norm = df_posle["Materijal"].map(norm_text)
     jm_fakt_norm = df_posle["Jedinica mere za fakturisanje"].map(norm_unit)
@@ -581,6 +749,13 @@ def procesiraj_obracun(lager_file, fakture_file, magacin_file=None, edited_rules
         df_posle.loc[mask_kom_final, "Količina za skidanje sa lagera"], errors="coerce"
     ).round(0)
 
+    # 7) magacin + injekt kalibracija
+    injekt_debug = pd.DataFrame()
+    mag_long = None
+    if magacin_file is not None:
+        mag_long = read_wide_stock_excel(magacin_file, label="Stanje_na_magacinu")
+        df_posle, injekt_debug = apply_injekt_packers_and_resins(df_posle, lager_long, mag_long=mag_long)
+
     # 8) ukupna potrošnja
     df_posle["Količina za skidanje sa lagera"] = pd.to_numeric(df_posle["Količina za skidanje sa lagera"], errors="coerce")
     potrosnja = (
@@ -591,28 +766,21 @@ def procesiraj_obracun(lager_file, fakture_file, magacin_file=None, edited_rules
     )
     potrosnja["Materijal_key"] = potrosnja["Materijal"].map(norm_text)
 
-    # 9) lager stanje (wide, red 1)
     lager_stanje = lager_long[["Materijal", "Materijal_key", "Stanje_na_lageru"]].copy()
 
-    # merge potrošnja + lager
     uporedba = pd.merge(potrosnja, lager_stanje, on="Materijal_key", how="outer", suffixes=("", "_lager"))
-    # izaberi “lep” naziv materijala
-    uporedba["Materijal"] = uporedba["Materijal"].fillna(uporedba["Materijal_lager"])
-    uporedba = uporedba.drop(columns=[c for c in ["Materijal_lager"] if c in uporedba.columns])
+    uporedba["Materijal"] = uporedba["Materijal"].fillna(uporedba.get("Materijal_lager"))
+    if "Materijal_lager" in uporedba.columns:
+        uporedba = uporedba.drop(columns=["Materijal_lager"])
 
     uporedba["Razlika_pre"] = uporedba["Stanje_na_lageru"] - uporedba["Ukupna_potrošnja"]
 
-    # 10) magacin stanje (wide, red 1) - KLJUČNO
-    if magacin_file is not None:
-        mag_long = read_wide_stock_excel(magacin_file, label="Stanje_na_magacinu")
-        mag_long = mag_long[["Materijal_key", "Stanje_na_magacinu"]]
-        uporedba = pd.merge(uporedba, mag_long, on="Materijal_key", how="left")
+    if mag_long is not None:
+        mag_only = mag_long[["Materijal_key", "Stanje_na_magacinu"]]
+        uporedba = pd.merge(uporedba, mag_only, on="Materijal_key", how="left")
     else:
         uporedba["Stanje_na_magacinu"] = np.nan
 
-    # 11) Novi koeficijent (da se finalna potrošnja poklopi sa magacinom)
-    # ideja: Ako znaš početni lager i stvarni završni magacin:
-    # "realna potrošnja" = Lager - Magacin
     uporedba["Realna_potrosnja_po_magacinu"] = uporedba["Stanje_na_lageru"] - uporedba["Stanje_na_magacinu"]
 
     def _koef_novi(row):
@@ -625,8 +793,6 @@ def procesiraj_obracun(lager_file, fakture_file, magacin_file=None, edited_rules
     uporedba["Koef_novi"] = uporedba.apply(_koef_novi, axis=1)
     uporedba["Finalna_potrošnja"] = uporedba["Ukupna_potrošnja"] * uporedba["Koef_novi"]
 
-    # 12) “ekstremi kalibracije” (podesi pragove po želji)
-    # npr. ako koef ode ispod 0.3 ili iznad 3.0
     CAL_MIN, CAL_MAX = 0.3, 3.0
     uporedba["Kalibracija_status"] = np.where(
         uporedba["Koef_novi"].between(CAL_MIN, CAL_MAX, inclusive="both"),
@@ -635,19 +801,20 @@ def procesiraj_obracun(lager_file, fakture_file, magacin_file=None, edited_rules
     )
     kalibracija_ekstremi = uporedba[uporedba["Kalibracija_status"].eq("EKSTREMNO")].copy()
 
-    # 13) preview pravila
     rules_used_df = rules_to_df(rules_dict)
 
-    return uporedba, df_posle, rules_used_df, kalibracija_ekstremi
+    return uporedba, df_posle, rules_used_df, kalibracija_ekstremi, injekt_debug
 
 # ======================================================
-# 13) Export (ako želiš)
+# 12) Export
 # ======================================================
 
-def export_to_excel(uporedba, df_fakture_posle):
+def export_to_excel(uporedba, df_fakture_posle, injekt_debug=None):
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         uporedba.to_excel(writer, index=False, sheet_name="uporedba")
         df_fakture_posle.to_excel(writer, index=False, sheet_name="fakture_obracun")
+        if injekt_debug is not None and not injekt_debug.empty:
+            injekt_debug.to_excel(writer, index=False, sheet_name="injekt_debug")
     buffer.seek(0)
     return buffer

@@ -17,7 +17,7 @@ st.title("📦 Obračun zaliha – Laser Lux")
 st.sidebar.header("Ulazni podaci")
 lager_file = st.sidebar.file_uploader("Lager Excel (ULAZ)", type=["xlsx"])
 fakture_file = st.sidebar.file_uploader("Fakture Excel (IZLAZ)", type=["xlsx"])
-magacin_file = st.sidebar.file_uploader("Stvarno stanje magacina (31.12)", type=["xlsx"])  # NOVO
+magacin_file = st.sidebar.file_uploader("Stvarno stanje magacina (31.12)", type=["xlsx"])
 st.sidebar.markdown("---")
 
 # ============================
@@ -63,8 +63,8 @@ if run_calc:
     else:
         rules_df_for_run = st.session_state.get("rules_df", edited_rules_df)
 
-        with st.spinner("Računam, molim sačekaj..."):
-            uporedba, df_fakture_posle, rules_used_df, kal_ekstremi = procesiraj_obracun(
+        with st.spinner("Računam..."):
+            uporedba, df_fakture_posle, rules_used_df, kal_ekstremi, injekt_debug = procesiraj_obracun(
                 lager_file,
                 fakture_file,
                 magacin_file=magacin_file,
@@ -73,8 +73,8 @@ if run_calc:
 
         st.success("✔ Obračun je završen.")
 
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(
-            ["📌 Uporedba", "⚠ Ekstremi kalibracije", "📄 Fakture – obračun", "🧮 Pravila (primenjena)", "📊 Grafikon"]
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+            ["📌 Uporedba", "⚠ Ekstremi kalibracije", "📄 Fakture – obračun", "🧮 Pravila (primenjena)", "📊 Grafikon", "🧪 Injekt debug"]
         )
 
         with tab1:
@@ -89,7 +89,6 @@ if run_calc:
                 "Finalna_potrošnja",
             ]
             show = uporedba.copy()
-            # za lep prikaz
             for c in ["Ukupna_potrošnja","Stanje_na_lageru","Razlika_pre","Stanje_na_magacinu","Finalna_potrošnja"]:
                 if c in show.columns:
                     show[c] = pd.to_numeric(show[c], errors="coerce")
@@ -133,14 +132,20 @@ if run_calc:
             else:
                 st.info("Nema dovoljno podataka za grafikon.")
 
+        with tab6:
+            st.subheader("Injekt debug (paketi: 1.0–1.4x da se uklopi na 31.12)")
+            if injekt_debug is None or injekt_debug.empty:
+                st.info("Nema injekt računa ili nema magacin fajla.")
+            else:
+                st.dataframe(injekt_debug, use_container_width=True)
+
         st.subheader("📎 Preuzimanje Excel rezultata")
-        buffer = export_to_excel(uporedba, df_fakture_posle)
+        buffer = export_to_excel(uporedba, df_fakture_posle, injekt_debug=injekt_debug)
         st.download_button(
             label="💾 Preuzmi Excel rezultat",
             data=buffer,
             file_name="obracun_zaliha.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-
 else:
     st.info("⬅ Uploaduj fajlove i klikni na **'Obračunaj zalihe'**.")
