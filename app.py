@@ -1,3 +1,4 @@
+# app.py
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -7,7 +8,8 @@ from obracun import (
     rules_to_df,
     RULE_TYPES,
     export_to_excel,
-    material_rules
+    material_rules,
+    build_calibration_table_and_apply,
 )
 
 st.set_page_config(page_title="Obračun zaliha", layout="wide")
@@ -17,16 +19,20 @@ st.title("📦 Obračun zaliha – Laser Lux")
 st.sidebar.header("Ulazni podaci")
 lager_file = st.sidebar.file_uploader("Lager Excel (ULAZ)", type=["xlsx"])
 fakture_file = st.sidebar.file_uploader("Fakture Excel (IZLAZ)", type=["xlsx"])
-stvarno_file = st.sidebar.file_uploader("Stvarno stanje magacina (POPIS)", type=["xlsx"])
+magacin_file = st.sidebar.file_uploader("Stvarno stanje magacina (POPIS)", type=["xlsx"])
 st.sidebar.markdown("---")
 
 # ============================
-# 🛠 Editor koeficijenata (PRAVI)
+# 🛠 Editor koeficijenata (pravila)
 # ============================
 st.sidebar.subheader("🧮 Pravila (koeficijenti)")
 
 if "rules_df" not in st.session_state:
     st.session_state["rules_df"] = rules_to_df(material_rules)
+
+if "rules_df_base" not in st.session_state:
+    # “inicijalna” kopija za ekstrem uporedbe
+    st.session_state["rules_df_base"] = st.session_state["rules_df"].copy()
 
 rules_df = st.session_state["rules_df"]
 
@@ -51,6 +57,7 @@ with c1:
 with c2:
     if st.button("↩ Reset"):
         st.session_state["rules_df"] = rules_to_df(material_rules)
+        st.session_state["rules_df_base"] = st.session_state["rules_df"].copy()
         st.info("Vraćeno na podrazumevano.")
 
 st.sidebar.markdown("---")
@@ -59,7 +66,7 @@ run_calc = st.sidebar.button("🚀 Obračunaj zalihe")
 # --------------- Main area ---------------
 if run_calc:
     if not lager_file or not fakture_file:
-        st.error("❌ Morate da uploadujete **oba** Excel fajla (lager i fakture).")
+        st.error("❌ Morate da uploadujete **lager** i **fakture**.")
     else:
         rules_df_for_run = st.session_state.get("rules_df", edited_rules_df)
 
@@ -67,20 +74,29 @@ if run_calc:
             uporedba, ekstremni, df_fakture_posle, rules_used_df = procesiraj_obracun(
                 lager_file,
                 fakture_file,
-                edited_rules_df=rules_df_for_run,
-                stvarno_file=stvarno_file
+                magacin_file=magacin_file,
+                edited_rules_df=rules_df_for_run
             )
 
         st.success("✔ Obračun je završen.")
 
-        tab1, tab2, tab3, tab4 = st.tabs(
-            ["📌 Koeficijenti i uporedba", "⚠ Ekstremi", "📄 Fakture – obračun", "🧮 Pravila konverzije"]
+        # ---- Kalibracija (Opcija B) – napravi tabelu, ali NE primenjuj automatski
+        extreme_low = st.sidebar.number_input("Kalibracija ekstrem: min ratio", value=0.5, step=0.1)
+        extreme_high = st.sidebar.number_input("Kalibracija ekstrem: max ratio", value=2.0, step=0.1)
+
+        rules_df_after_calib, calib_df, calib_extremes_df = build_calibration_table_and_apply(
+            st.session_state["rules_df"],
+            uporedba,
+            extreme_low=float(extreme_low),
+            extreme_high=float(extreme_high)
         )
 
-        # ✅ Tab 1: samo kolone koje želiš
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(
+            ["📌 Uporedba", "⚠ Ekstremi", "📄 Fakture – obračun", "🧮 Pravila (run)", "🧩 Kalibracija"]
+        )
+
         with tab1:
-            st.subheader("Uporedba (potrošnja, lager, popis)")
-
+            st.subheader("Uporedba (ključne kolone + popis)")
             cols = [
                 "Materijal",
                 "Ukupna_potrošnja",
@@ -90,33 +106,17 @@ if run_calc:
                 "Koef_popis",
                 "Finalna_potrošnja",
             ]
-            show_df = uporedba.copy()
+            show = uporedba.copy()
             for c in cols:
-                if c not in show_df.columns:
-                    show_df[c] = pd.NA
+                if c not in show.columns:
+                    show[c] = None
+            st.dataframe(show[cols], use_container_width=True)
 
-            st.dataframe(show_df[cols], use_container_width=True)
-
-        # ✅ Tab 2: ekstremi + iste kolone
         with tab2:
-            st.subheader("Ekstremne vrednosti (pregled)")
-            cols = [
-                "Materijal",
-                "Ukupna_potrošnja",
-                "Stanje_na_lageru",
-                "Razlika_pre",
-                "Stanje_na_magacinu",
-                "Koef_popis",
-                "Finalna_potrošnja",
-            ]
-            if ekstremni is None or ekstremni.empty:
-                st.info("Nema ekstremnih vrednosti po trenutno zadatim granicama.")
-            else:
-                tmp = ekstremni.copy()
-                for c in cols:
-                    if c not in tmp.columns:
-                        tmp[c] = pd.NA
-                st.dataframe(tmp[cols], use_container_width=True)
+            st.subheader("Ekstremne vrednosti (stari koeficijent lager/potrošnja)")
+            cols_to_show = ["Materijal", "Ukupna_potrošnja", "Stanje_na_lageru", "Razlika_pre", "Koeficijent", "Napomena_coef"]
+            df_show = ekstremni[cols_to_show].copy() if not ekstremni.empty else ekstremni
+            st.dataframe(df_show, use_container_width=True)
 
         with tab3:
             st.subheader("Fakture – obračun količina za skidanje sa lagera")
@@ -126,11 +126,33 @@ if run_calc:
             st.subheader("Pravila konverzije (primenjena u ovom obračunu)")
             st.dataframe(rules_used_df, use_container_width=True)
 
-        # --- chart ---
-        st.markdown("---")
-        st.subheader("📊 Poređenje stanja na lageru i potrošnje po materijalu")
+        with tab5:
+            st.subheader("Kalibracija (Opcija B) — predlog izmena pravila prema popisu")
 
-        use_final = st.checkbox("Koristi FINALNU potrošnju (po popisu)", value=True)
+            if calib_df is None or calib_df.empty:
+                st.info("Nema dovoljno podataka za kalibraciju (treba Ukupna_potrošnja, Stanje_na_lageru i Stanje_na_magacinu).")
+            else:
+                st.write("Ovo je tabela šta bi se promenilo u pravilima (menja se samo primarno pravilo po materijalu).")
+                st.dataframe(calib_df, use_container_width=True)
+
+                st.markdown("### ⚠ Ekstremi kalibracije (prevelika promena faktora)")
+                if calib_extremes_df is None or calib_extremes_df.empty:
+                    st.info("Nema ekstremnih promena po zadatim granicama.")
+                else:
+                    st.dataframe(calib_extremes_df, use_container_width=True)
+
+                colA, colB = st.columns([1, 2])
+                with colA:
+                    if st.button("✅ Primeni kalibraciju u pravila"):
+                        st.session_state["rules_df"] = rules_df_after_calib
+                        st.success("Pravila su ažurirana kalibracijom. Pokreni obračun ponovo.")
+                        st.rerun()
+                with colB:
+                    st.caption("Ovo menja faktore u tabeli pravila (Opcija B). Sledeći obračun koristi nove faktore.")
+
+        # --- Side-by-side bar chart ---
+        st.markdown("---")
+        st.subheader("📊 Poređenje stanja na lageru i ukupne potrošnje po materijalu")
 
         chart_df = uporedba.dropna(subset=["Materijal", "Stanje_na_lageru", "Ukupna_potrošnja"]).copy()
         if len(chart_df) > 0:
@@ -141,20 +163,15 @@ if run_calc:
                 value=min(30, len(chart_df)),
                 step=1
             )
-
-            y_col = "Ukupna_potrošnja"
-            if use_final and "Finalna_potrošnja" in chart_df.columns and chart_df["Finalna_potrošnja"].notna().any():
-                y_col = "Finalna_potrošnja"
-
-            chart_df["Abs_diff"] = (chart_df["Stanje_na_lageru"] - chart_df[y_col]).abs()
+            chart_df["Abs_diff"] = (chart_df["Stanje_na_lageru"] - chart_df["Ukupna_potrošnja"]).abs()
             chart_df = chart_df.sort_values("Abs_diff", ascending=False).head(max_items)
 
             fig = px.bar(
                 chart_df,
                 x="Materijal",
-                y=["Stanje_na_lageru", y_col],
+                y=["Stanje_na_lageru", "Ukupna_potrošnja"],
                 barmode="group",
-                title=f"Stanje na lageru vs {y_col}",
+                title="Stanje na lageru vs ukupna potrošnja",
             )
             fig.update_layout(xaxis_tickangle=45, height=650, legend_title_text="Količina")
             st.plotly_chart(fig, use_container_width=True)
@@ -163,7 +180,14 @@ if run_calc:
 
         # --- download ---
         st.subheader("📎 Preuzimanje Excel rezultata")
-        buffer = export_to_excel(uporedba, ekstremni, df_fakture_posle)
+        buffer = export_to_excel(
+            uporedba,
+            ekstremni,
+            df_fakture_posle,
+            calibration_df=calib_df,
+            ekstremi_kalibracije=calib_extremes_df,
+            rules_used_df=rules_used_df
+        )
         st.download_button(
             label="💾 Preuzmi Excel rezultat",
             data=buffer,
@@ -172,4 +196,4 @@ if run_calc:
         )
 
 else:
-    st.info("⬅ Uploaduj Excel fajlove u levom meniju i klikni na **'Obračunaj zalihe'**.")
+    st.info("⬅ Uploaduj fajlove u levom meniju i klikni na **'Obračunaj zalihe'**.")
