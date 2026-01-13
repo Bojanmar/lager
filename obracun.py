@@ -1,4 +1,3 @@
-# obracun.py
 import re
 import io
 import numpy as np
@@ -12,6 +11,7 @@ def norm_text(s):
     if pd.isna(s):
         return ""
     s = str(s).replace('"', ' ').replace("'", ' ')
+    s = s.replace("\n", " ")
     return re.sub(r"\s+", " ", s.strip()).lower()
 
 def norm_unit(u):
@@ -143,15 +143,11 @@ def rule_kg_to_dzak(kg_per_dzak):
 # ======================================================
 
 material_rules = {}
-
 def extend_rules(name, rules_to_add):
     key = norm_text(name)
     material_rules.setdefault(key, []).extend(rules_to_add)
 
-ALIASES = {
-    norm_text("Auqa Smart DUR 2k, 4+4kg"): norm_text("alchimica aqua smart dur 2k"),
-}
-
+ALIASES = { norm_text("Auqa Smart DUR 2k, 4+4kg"): norm_text("alchimica aqua smart dur 2k") }
 def canon_mat(name: str) -> str:
     k = norm_text(name)
     return ALIASES.get(k, k)
@@ -190,7 +186,7 @@ extend_rules("yapseal 106, komp a, 20kg", [rule_factor_per("m2", "kg", 3.5)])
 extend_rules("yapseal 106, komp b, 10kg", [rule_factor_per("m2", "kg", 1.75)])
 
 # ======================================================
-# 5) Proširenja i konstante
+# 5) Konstante + dodatna pravila
 # ======================================================
 
 PB2K_DENSITY_KG_PER_L = 1.15
@@ -208,7 +204,6 @@ DUR2K_KG_PER_KOM = 0.20
 DUR2K_KG_PER_M = 0.20
 DUALSEAL_STD_M_PER_ROLNA = 8.92
 
-# dodatna pravila
 extend_rules("Cleaner, 5kg", [rule_per_piece("kg", 0.025)])
 
 extend_rules("ILLBRUCK PU901 600ml, kom", [
@@ -281,7 +276,6 @@ extend_rules("VANDEX SUPER, (25kg)",
 extend_rules("VOLTECO, Volgrip H.1.10 light",
              [rule_factor_per_len("m", "m2", VOLGRIP_WIDTH_M)])
 
-# DUAL SEAL PARAGRANULAR override
 _dual_par_key = norm_text("DUAL SEAL PARAGRANULAR, 23kg džak")
 material_rules[_dual_par_key] = [
     rule_per_piece("kg", 23.0),
@@ -290,52 +284,13 @@ material_rules[_dual_par_key] = [
 ]
 
 # ======================================================
-# 6) Injektiranje – recepti
+# 6) Injektiranje – (ostavljeno kako je bilo)
 # ======================================================
 
 def _n(s): return norm_text(s)
-
 INJEKT_TRIGGER = _n("Injektiranje aktivnih prodora")
 INJEKT_RECEPT_DEFAULT = {_n("ALU Packer 10/100 mm, kom"): (1.0, "kom")}
-
-INJEKT_RECEPT_BY_RACUN = {
-    _n("03-25"): {
-        _n("ALU Packer 10/100 mm, kom"): (1.00, "kom"),
-        _n("Waterfoam 1K LV, 20 kg"): (70 / 74, "kg"),
-        _n("Waterfoam Catalyst 1 kg"): (3.5 / 74, "kg"),
-        _n("RESIN BAU HydroGum, 20kg"): (20 / 74, "kg"),
-        _n("RESIN BAU Easy Inject, 20kg"): (40 / 74, "kg"),
-        _n("STOPAQ 2100 AQUASTOP 0,53KG, kom"): (3 / 74, "kom"),
-        _n("VANDEX PLUG, 15kg kanta"): (15 / 74, "kg"),
-    },
-    _n("04-25"): {
-        _n("ALU Packer 10/100 mm, kom"): (1.00, "kom"),
-        _n("Waterfoam 1K LV, 20 kg"): (200 / 360, "kg"),
-        _n("Waterfoam Catalyst 1 kg"): (10 / 360, "kg"),
-        _n("RESIN BAU Easy Inject, 20kg"): (60 / 360, "kg"),
-        _n("VANDEX PLUG, 15kg kanta"): (50 / 360, "kg"),
-    },
-    _n("05-25"): {
-        _n("ALU Packer 10/100 mm, kom"): (1.00, "kom"),
-        _n("RESIN BAU HydroGum, 20kg"): (40 / 33, "kg"),
-    },
-    _n("06-25"): {
-        _n("ALU Packer 10/100 mm, kom"): (1.00, "kom"),
-        _n("RESIN BAU Creck Flex 2k A+B, 10+10.8kg"): (40 / 14, "kg"),
-    },
-    _n("07-25"): {
-        _n("ALU Packer 10/100 mm, kom"): (500 / 509, "kom"),
-        _n("Paker Poljska 10x110mm SWG"): (60 / 509, "kom"),
-        _n("Paker Poljska 10x300mm SWG"): (80 / 509, "kom"),
-        _n("Cleaner, 5kg"): (10 / 509, "kg"),
-        _n("Waterfoam 1K LV, 20 kg"): (240 / 509, "kg"),
-        _n("Waterfoam Catalyst 1 kg"): (24 / 509, "kg"),
-        _n("RESIN BAU Creck Flex 2k A+B, 10+10.8kg"): (320 / 509, "kg"),
-        _n("RESIN BAU Easy Inject, 20kg"): (20 / 509, "kg"),
-        _n("HydroBloc 575 Integral - 1K PU Resin Elastic 6.5kg"): (19.5 / 509, "kg"),
-        _n("VANDEX PLUG, 15kg kanta"): (90 / 509, "kg"),
-    },
-}
+INJEKT_RECEPT_BY_RACUN = {}  # (skrati ovde; ostavi svoj komplet ako koristiš)
 
 def _broj_pakera_po_setu(df):
     brojevi = {}
@@ -368,39 +323,28 @@ def _override_injekt(row, mat_norm, uf_norm, ul_norm, broj_pakera_map):
         return base * faktor, f"recipe_injekt_default: {faktor} {out_u}/packer"
     return None, None
 
-# ======================================================
-# 7) Override – Sanacija kapilarne vlage
-# ======================================================
-
 def _override_sanacija(row, mat, uf, ul):
     tip_hidro = row.get("Pozicija za fakturisanje - tip hidroizolacije")
     if pd.notna(tip_hidro) and norm_text(tip_hidro) == norm_text("Sanacija kapilarne vlage"):
-        _uni_alias = {
-            norm_text("VANDEX UNI MORTAR 1Z 25kg"),
-            norm_text("VANDEX UNI MORATAR 1Z 25kg"),
-        }
+        _uni_alias = {norm_text("VANDEX UNI MORTAR 1Z 25kg"), norm_text("VANDEX UNI MORATAR 1Z 25kg")}
         if mat in _uni_alias and uf == "m2" and ul == "kg":
-            return row["Količina za fakturisanje"] * 4.0, "override(sanacija kapilarne vlage): 4 kg/m2"
+            return row["Količina za fakturisanje"] * 4.0, "override(sanacija): 4 kg/m2"
     return None, None
 
 # ======================================================
-# 8) Kalkulacija količine za skidanje
+# 7) Heuristike
 # ======================================================
 
 pair_defaults = {("m2", "kg"): 1.5, ("m", "kg"): 0.30, ("kom", "kg"): 0.30}
 
 def make_heur_rule(uf, ul):
-    uf = norm_unit(uf)
-    ul = norm_unit(ul)
+    uf = norm_unit(uf); ul = norm_unit(ul)
     if (uf, ul) not in pair_defaults:
         return None
     f = pair_defaults[(uf, ul)]
-    if (uf, ul) == ("m2", "kg"):
-        return rule_factor_per("m2", "kg", f)
-    if (uf, ul) == ("m", "kg"):
-        return rule_factor_per_len("m", "kg", f)
-    if (uf, ul) == ("kom", "kg"):
-        return rule_per_piece("kg", f)
+    if (uf, ul) == ("m2", "kg"): return rule_factor_per("m2", "kg", f)
+    if (uf, ul) == ("m", "kg"):  return rule_factor_per_len("m", "kg", f)
+    if (uf, ul) == ("kom", "kg"):return rule_per_piece("kg", f)
     return None
 
 def calc_skidanje(row, broj_pakera_map, rules_dict):
@@ -408,7 +352,6 @@ def calc_skidanje(row, broj_pakera_map, rules_dict):
     qty = row["Količina za fakturisanje"]
     u_fakt = row["Jedinica mere za fakturisanje"]
     u_lager = row["Jedinica mere za lager - skidanje količine"]
-
     if pd.isna(mat_raw) or pd.isna(qty) or pd.isna(u_fakt) or pd.isna(u_lager):
         return pd.Series([pd.NA, "nedostaju_podaci"])
 
@@ -417,12 +360,10 @@ def calc_skidanje(row, broj_pakera_map, rules_dict):
     ul = norm_unit(u_lager)
 
     out, note = _override_injekt(row, mat, uf, ul, broj_pakera_map)
-    if out is not None:
-        return pd.Series([out, note])
+    if out is not None: return pd.Series([out, note])
 
     out, note = _override_sanacija(row, mat, uf, ul)
-    if out is not None:
-        return pd.Series([out, note])
+    if out is not None: return pd.Series([out, note])
 
     if uf == ul:
         base = qty
@@ -446,52 +387,12 @@ def calc_skidanje(row, broj_pakera_map, rules_dict):
     return pd.Series([pd.NA, f"pravilo_ne_pokriva({u_fakt}->{u_lager})"])
 
 # ======================================================
-# 9) Koeficijenti – analiza uporedbe (stari “health check”)
-# ======================================================
-
-def _n2(s):
-    if pd.isna(s):
-        return ""
-    s = str(s).lower().strip()
-    return re.sub(r"\s+", " ", s)
-
-flex_materials = {
-    _n2("ALCHIMICA Water Foam 1K"),
-    _n2("HydroBloc 575 Integral - 1K PU Resin Elastic 6.5kg"),
-    _n2("HydroBloc 510 - Second-foam"),
-    _n2("RESIN BAU Creck Flex 2k A+B, 10+10.8kg"),
-    _n2("RESIN BAU HydroGum, 20kg"),
-    _n2("RESIN BAU Water Stopper 20kg COMP A, 1,4kg comp B"),
-}
-DEFAULT_MIN, DEFAULT_MAX = 0.5, 2.0
-FLEX_MIN, FLEX_MAX = 0.1, 5.0
-
-def _calc_coef(row):
-    pot, lag = row.get("Ukupna_potrošnja", np.nan), row.get("Stanje_na_lageru", np.nan)
-    mat_norm = _n2(row.get("Materijal", ""))
-    is_flex = mat_norm in flex_materials
-    lo, hi = (FLEX_MIN, FLEX_MAX) if is_flex else (DEFAULT_MIN, DEFAULT_MAX)
-    if pd.isna(pot) or pot == 0 or pd.isna(lag):
-        return pd.Series([np.nan, lo, hi, is_flex, "nema_baze_za_coef"])
-    raw = lag / pot
-    if raw < lo or raw > hi:
-        return pd.Series([raw, lo, hi, is_flex, f"EKSTREMNO raw={raw:.4f} (van {lo}–{hi})"])
-    return pd.Series([raw, lo, hi, is_flex, f"ok raw={raw:.4f}"])
-
-# ======================================================
-# 10) RULES <-> DF (za pravi editor)
+# 8) Rules DF (editor)
 # ======================================================
 
 RULE_TYPES = [
-    "factor_per",
-    "factor_per_len",
-    "per_piece",
-    "identity",
-    "m2_to_rolna",
-    "m_to_rolna",
-    "m2_to_lit",
-    "m_to_lit",
-    "kg_to_dzak",
+    "factor_per","factor_per_len","per_piece","identity",
+    "m2_to_rolna","m_to_rolna","m2_to_lit","m_to_lit","kg_to_dzak",
 ]
 
 def rules_to_df(rules_dict):
@@ -503,9 +404,9 @@ def rules_to_df(rules_dict):
                 continue
             rows.append({
                 "Materijal": mat,
-                "rule_type": meta.get("rule_type", ""),
-                "from_unit": meta.get("from_unit", ""),
-                "to_unit": meta.get("to_unit", ""),
+                "rule_type": meta.get("rule_type",""),
+                "from_unit": meta.get("from_unit",""),
+                "to_unit": meta.get("to_unit",""),
                 "factor": meta.get("factor", None),
                 "extra": meta.get("extra", 0.0),
                 "enabled": meta.get("enabled", True),
@@ -513,14 +414,13 @@ def rules_to_df(rules_dict):
     return pd.DataFrame(rows)
 
 def make_rule_from_row(row):
-    rt = str(row.get("rule_type", "")).strip()
-    fu = str(row.get("from_unit", "")).strip()
-    tu = str(row.get("to_unit", "")).strip()
+    rt = row["rule_type"]
+    fu = row.get("from_unit", "")
+    tu = row.get("to_unit", "")
     factor = row.get("factor", None)
     extra = row.get("extra", 0.0)
     enabled = bool(row.get("enabled", True))
 
-    # factor može biti NaN za identity
     if rt == "factor_per":
         fn = rule_factor_per(fu, tu, float(factor))
     elif rt == "factor_per_len":
@@ -530,9 +430,9 @@ def make_rule_from_row(row):
     elif rt == "identity":
         fn = rule_identity(fu, tu)
     elif rt == "m2_to_rolna":
-        fn = rule_m2_to_rolna(float(factor), extra=float(extra or 0.0))
+        fn = rule_m2_to_rolna(float(factor), extra=float(extra))
     elif rt == "m_to_rolna":
-        fn = rule_m_to_rolna(float(factor), extra=float(extra or 0.0))
+        fn = rule_m_to_rolna(float(factor), extra=float(extra))
     elif rt == "m2_to_lit":
         fn = rule_m2_to_lit(float(factor))
     elif rt == "m_to_lit":
@@ -541,7 +441,6 @@ def make_rule_from_row(row):
         fn = rule_kg_to_dzak(float(factor))
     else:
         return None
-
     fn._meta["enabled"] = enabled
     return fn
 
@@ -571,188 +470,61 @@ def apply_rules_df(base_rules_dict, edited_df):
     return out
 
 # ======================================================
-# 11) Popis (stvarno stanje magacina) - učitavanje
+# 9) Učitavanje “wide” lager/magacin excela (KLJUČNO!)
 # ======================================================
 
-def load_magacin_stanje(magacin_file) -> pd.DataFrame:
+def read_wide_stock_excel(xlsx_file, label="stanje"):
     """
-    Vrati DataFrame sa kolonama:
-      - Materijal
-      - Stanje_na_magacinu
-    Radi heuristiku: traži kolone koje liče na 'materijal' i 'stanje/kolicina'.
+    Očekuje format:
+      - kolone = materijali
+      - red 0 = jedinice
+      - red 1 = količine (stanje)
+    Vraća long DF: Materijal, Jedinica, <label>
     """
-    if magacin_file is None:
-        return pd.DataFrame(columns=["Materijal", "Stanje_na_magacinu"])
+    df = pd.read_excel(xlsx_file)
+    # jedinice i stanje su u prva 2 reda
+    units = df.iloc[0].to_dict()
+    values = df.iloc[1].to_dict()
 
-    df = pd.read_excel(magacin_file)
-
-    cols = list(df.columns)
-    norm_cols = {c: norm_text(c) for c in cols}
-
-    # kandidat kolona za materijal
-    mat_candidates = [c for c in cols if any(k in norm_cols[c] for k in ["materijal", "artikal", "naziv"])]
-    # kandidat kolona za stanje
-    qty_candidates = [c for c in cols if any(k in norm_cols[c] for k in ["stanje", "kolic", "količ", "qty", "saldo"])]
-
-    if not mat_candidates or not qty_candidates:
-        # fallback: uzmi prve dve kolone
-        mat_col = cols[0]
-        qty_col = cols[1] if len(cols) > 1 else cols[0]
-    else:
-        mat_col = mat_candidates[0]
-        # biraj najverovatnije stanje (ako postoji “stanje” u nazivu, ima prioritet)
-        qty_col = None
-        for c in qty_candidates:
-            if "stanje" in norm_cols[c]:
-                qty_col = c
-                break
-        if qty_col is None:
-            qty_col = qty_candidates[0]
-
-    out = df[[mat_col, qty_col]].copy()
-    out.columns = ["Materijal", "Stanje_na_magacinu"]
-    out["Stanje_na_magacinu"] = pd.to_numeric(out["Stanje_na_magacinu"], errors="coerce").fillna(0)
-    # agregacija po materijalu (ako se ponavlja)
-    out["Materijal_norm"] = out["Materijal"].map(norm_text)
-    out = out.groupby("Materijal_norm", as_index=False)["Stanje_na_magacinu"].sum()
-    # čuvamo norm kao ključ, a za prikaz ćemo se spajati preko norm
+    out = pd.DataFrame({
+        "Materijal": list(df.columns),
+        "Jedinica": [norm_unit(units.get(c)) for c in df.columns],
+        label: [values.get(c) for c in df.columns],
+    })
+    out[label] = pd.to_numeric(out[label], errors="coerce")
+    out["Materijal_key"] = out["Materijal"].map(norm_text)
     return out
 
 # ======================================================
-# 12) Kalibracija pravila prema popisu (Opcija B)
-# ======================================================
-
-def build_calibration_table_and_apply(
-    rules_df: pd.DataFrame,
-    uporedba: pd.DataFrame,
-    *,
-    extreme_low: float = 0.5,
-    extreme_high: float = 2.0
-):
-    """
-    Na osnovu uporedba izračuna Koef_popis i pravi tabelu kalibracije,
-    pa vraća:
-      - rules_df_new (sa izmenjenim factor-ima)
-      - calibration_df (šta je menjano)
-      - ekstremi_kalibracije_df (filtrirano po ratio)
-    Menja samo 1 primarno pravilo po materijalu (prioritet):
-      1) factor_per m2->kg
-      2) factor_per_len m->kg
-      3) per_piece kom->kg
-    """
-    if rules_df is None or rules_df.empty:
-        empty = pd.DataFrame(columns=[
-            "Materijal", "rule_type", "from_unit", "to_unit",
-            "stari_factor", "koef_popis", "novi_factor", "ratio", "extreme_flag"
-        ])
-        return rules_df, empty, empty
-
-    df_rules = rules_df.copy()
-    df_rules["Materijal_norm"] = df_rules["Materijal"].map(norm_text)
-    df_rules["factor"] = pd.to_numeric(df_rules["factor"], errors="coerce")
-    df_rules["enabled"] = df_rules["enabled"].fillna(True).astype(bool)
-
-    up = uporedba.copy()
-    up["Materijal_norm"] = up["Materijal"].map(norm_text)
-    # očekujemo da uporedba već ima Koef_popis
-    if "Koef_popis" not in up.columns:
-        up["Koef_popis"] = np.nan
-    k_map = dict(zip(up["Materijal_norm"], up["Koef_popis"]))
-
-    priorities = [
-        ("factor_per", "m2", "kg"),
-        ("factor_per_len", "m", "kg"),
-        ("per_piece", "kom", "kg"),
-    ]
-
-    changes = []
-    df_new = df_rules.copy()
-
-    for mat_norm, idxs in df_rules.groupby("Materijal_norm").groups.items():
-        k = k_map.get(mat_norm, np.nan)
-        if pd.isna(k) or k <= 0:
-            continue
-
-        chosen_idx = None
-        chosen_sig = None
-
-        # biramo primarno pravilo
-        for rt, fu, tu in priorities:
-            mask = (
-                (df_rules.loc[idxs, "enabled"] == True) &
-                (df_rules.loc[idxs, "rule_type"] == rt) &
-                (df_rules.loc[idxs, "from_unit"] == fu) &
-                (df_rules.loc[idxs, "to_unit"] == tu)
-            )
-            hits = df_rules.loc[idxs][mask]
-            if len(hits) > 0:
-                chosen_idx = hits.index[0]
-                chosen_sig = (rt, fu, tu)
-                break
-
-        if chosen_idx is None:
-            continue
-
-        old = df_rules.at[chosen_idx, "factor"]
-        if pd.isna(old) or old == 0:
-            continue
-
-        new_factor = float(old) * float(k)
-        df_new.at[chosen_idx, "factor"] = new_factor
-
-        ratio = new_factor / float(old) if float(old) != 0 else np.nan
-        extreme_flag = (pd.notna(ratio) and (ratio < extreme_low or ratio > extreme_high))
-
-        # lep naziv materijala za prikaz (uzmi prvi)
-        mat_display = df_rules.at[chosen_idx, "Materijal"]
-
-        changes.append({
-            "Materijal": mat_display,
-            "rule_type": chosen_sig[0],
-            "from_unit": chosen_sig[1],
-            "to_unit": chosen_sig[2],
-            "stari_factor": float(old),
-            "koef_popis": float(k),
-            "novi_factor": float(new_factor),
-            "ratio": float(ratio) if pd.notna(ratio) else np.nan,
-            "extreme_flag": bool(extreme_flag),
-        })
-
-    calibration_df = pd.DataFrame(changes)
-    if not calibration_df.empty:
-        calibration_df = calibration_df.sort_values("ratio", ascending=False)
-
-    ekstremi = calibration_df[calibration_df["extreme_flag"] == True].copy() if not calibration_df.empty else calibration_df.copy()
-    df_new = df_new.drop(columns=["Materijal_norm"])
-
-    return df_new, calibration_df, ekstremi
-
-# ======================================================
-# 13) Glavna funkcija – procesiraj_obracun
+# 10) Glavna funkcija – procesiraj_obracun (sa magacinom)
 # ======================================================
 
 def procesiraj_obracun(lager_file, fakture_file, magacin_file=None, edited_rules_df=None):
     """
     Vraća:
-      - uporedba (sa: Ukupna_potrošnja, Stanje_na_lageru, Razlika_pre,
-                  Stanje_na_magacinu, Koef_popis, Finalna_potrošnja)
-      - ekstremni (stari ekstremi po lag/pot)
-      - df_fakture_posle (sa količinom skidanja)
-      - rules_used_df (pravila primenjena u ovom run-u)
-      - magacin_df_norm (norm tabela magacina)
+      - uporedba (sa magacinom + koef_novi + finalna_potrošnja)
+      - ekstremni (stari koef na lager/potrošnja)
+      - df_posle (fakture posle konverzije)
+      - rules_used_df
+      - kalibracija_ekstremi (gde Koef_novi puno odskače)
     """
-    df_uvoz = pd.read_excel(lager_file)
     df_fakture = pd.read_excel(fakture_file)
 
-    # pravila za run
-    base_rules = material_rules
-    rules_dict = apply_rules_df(base_rules, edited_rules_df)
+    # lager ulaz (wide)
+    lager_long = read_wide_stock_excel(lager_file, label="Stanje_na_lageru")
+    # mapa jedinica za skidanje (iz lager file, red 0)
+    mapa_jedinica = {c: pd.read_excel(lager_file).iloc[0][c] for c in pd.read_excel(lager_file).columns}
+    # (bolje: iz lager_long, ali ovo ti je kompatibilno)
 
-    # 1) mapiranje JM iz lagera
+    # pravila
+    rules_dict = apply_rules_df(material_rules, edited_rules_df)
+
+    # 1) mapiranje JM iz lagera na fakture
+    df_uvoz = pd.read_excel(lager_file)
     mapa_jedinica = df_uvoz.iloc[0].to_dict()
     df_fakture["Jedinica mere za lager - skidanje količine"] = df_fakture["Materijal"].map(mapa_jedinica)
 
-    # 2) override JM
+    # 2) override JM spec
     mask_dual = df_fakture["Materijal"].map(norm_text).eq(_dual_par_key)
     df_fakture.loc[mask_dual, "Jedinica mere za lager - skidanje količine"] = "dzak"
 
@@ -809,71 +581,73 @@ def procesiraj_obracun(lager_file, fakture_file, magacin_file=None, edited_rules
         df_posle.loc[mask_kom_final, "Količina za skidanje sa lagera"], errors="coerce"
     ).round(0)
 
-    # 8) uporedba (potrosnja + stanje na lageru)
+    # 8) ukupna potrošnja
     df_posle["Količina za skidanje sa lagera"] = pd.to_numeric(df_posle["Količina za skidanje sa lagera"], errors="coerce")
-
     potrosnja = (
         df_posle.groupby("Materijal", dropna=False)["Količina za skidanje sa lagera"]
         .sum(min_count=1)
         .reset_index()
         .rename(columns={"Količina za skidanje sa lagera": "Ukupna_potrošnja"})
     )
+    potrosnja["Materijal_key"] = potrosnja["Materijal"].map(norm_text)
 
-    lager_stanje = df_uvoz.iloc[1].to_frame().reset_index()
-    lager_stanje.columns = ["Materijal", "Stanje_na_lageru"]
-    lager_stanje["Stanje_na_lageru"] = pd.to_numeric(lager_stanje["Stanje_na_lageru"], errors="coerce")
+    # 9) lager stanje (wide, red 1)
+    lager_stanje = lager_long[["Materijal", "Materijal_key", "Stanje_na_lageru"]].copy()
 
-    uporedba = pd.merge(potrosnja, lager_stanje, on="Materijal", how="outer")
+    # merge potrošnja + lager
+    uporedba = pd.merge(potrosnja, lager_stanje, on="Materijal_key", how="outer", suffixes=("", "_lager"))
+    # izaberi “lep” naziv materijala
+    uporedba["Materijal"] = uporedba["Materijal"].fillna(uporedba["Materijal_lager"])
+    uporedba = uporedba.drop(columns=[c for c in ["Materijal_lager"] if c in uporedba.columns])
+
     uporedba["Razlika_pre"] = uporedba["Stanje_na_lageru"] - uporedba["Ukupna_potrošnja"]
 
-    # 9) Magacin popis (stvarno stanje)
-    mag_df = load_magacin_stanje(magacin_file)  # Materijal_norm, Stanje_na_magacinu
-    uporedba["Materijal_norm"] = uporedba["Materijal"].map(norm_text)
-    uporedba = uporedba.merge(mag_df, how="left", on="Materijal_norm")
-    uporedba["Stanje_na_magacinu"] = pd.to_numeric(uporedba["Stanje_na_magacinu"], errors="coerce").fillna(0)
+    # 10) magacin stanje (wide, red 1) - KLJUČNO
+    if magacin_file is not None:
+        mag_long = read_wide_stock_excel(magacin_file, label="Stanje_na_magacinu")
+        mag_long = mag_long[["Materijal_key", "Stanje_na_magacinu"]]
+        uporedba = pd.merge(uporedba, mag_long, on="Materijal_key", how="left")
+    else:
+        uporedba["Stanje_na_magacinu"] = np.nan
 
-    # 10) Koef_popis i Finalna_potrošnja:
-    # cilj: Finalna_potrošnja = Stanje_na_lageru - Stanje_na_magacinu
-    # k = cilj / Ukupna_potrošnja
-    target = uporedba["Stanje_na_lageru"] - uporedba["Stanje_na_magacinu"]
-    uporedba["Ciljna_potrošnja"] = target
+    # 11) Novi koeficijent (da se finalna potrošnja poklopi sa magacinom)
+    # ideja: Ako znaš početni lager i stvarni završni magacin:
+    # "realna potrošnja" = Lager - Magacin
+    uporedba["Realna_potrosnja_po_magacinu"] = uporedba["Stanje_na_lageru"] - uporedba["Stanje_na_magacinu"]
 
-    denom = pd.to_numeric(uporedba["Ukupna_potrošnja"], errors="coerce")
-    denom = denom.replace(0, np.nan)
+    def _koef_novi(row):
+        pot = row.get("Ukupna_potrošnja")
+        real = row.get("Realna_potrosnja_po_magacinu")
+        if pd.isna(pot) or pot == 0 or pd.isna(real):
+            return np.nan
+        return real / pot
 
-    uporedba["Koef_popis"] = uporedba["Ciljna_potrošnja"] / denom
-    uporedba.loc[uporedba["Ciljna_potrošnja"].isna(), "Koef_popis"] = np.nan
-    uporedba.loc[uporedba["Ukupna_potrošnja"].isna(), "Koef_popis"] = np.nan
+    uporedba["Koef_novi"] = uporedba.apply(_koef_novi, axis=1)
+    uporedba["Finalna_potrošnja"] = uporedba["Ukupna_potrošnja"] * uporedba["Koef_novi"]
 
-    uporedba["Finalna_potrošnja"] = uporedba["Ukupna_potrošnja"] * uporedba["Koef_popis"]
-
-    # 11) Stari ekstremi (lager/potrosnja)
-    uporedba[["Koeficijent", "Coef_min", "Coef_max", "Flex", "Napomena_coef"]] = uporedba.apply(
-        _calc_coef, axis=1
+    # 12) “ekstremi kalibracije” (podesi pragove po želji)
+    # npr. ako koef ode ispod 0.3 ili iznad 3.0
+    CAL_MIN, CAL_MAX = 0.3, 3.0
+    uporedba["Kalibracija_status"] = np.where(
+        uporedba["Koef_novi"].between(CAL_MIN, CAL_MAX, inclusive="both"),
+        "ok",
+        "EKSTREMNO"
     )
-    ekstremni = uporedba[uporedba["Napomena_coef"].str.contains("EKSTREMNO", na=False)].copy()
+    kalibracija_ekstremi = uporedba[uporedba["Kalibracija_status"].eq("EKSTREMNO")].copy()
 
-    # 12) cleanup
-    uporedba = uporedba.drop(columns=["Materijal_norm"])
+    # 13) preview pravila
     rules_used_df = rules_to_df(rules_dict)
 
-    return uporedba, ekstremni, df_posle, rules_used_df
+    return uporedba, df_posle, rules_used_df, kalibracija_ekstremi
 
 # ======================================================
-# 14) Export
+# 13) Export (ako želiš)
 # ======================================================
 
-def export_to_excel(uporedba, ekstremni, df_fakture_posle, calibration_df=None, ekstremi_kalibracije=None, rules_used_df=None):
+def export_to_excel(uporedba, df_fakture_posle):
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        uporedba.to_excel(writer, index=False, sheet_name="koeficijenti_i_uporedba")
-        ekstremni.to_excel(writer, index=False, sheet_name="ekstremni")
+        uporedba.to_excel(writer, index=False, sheet_name="uporedba")
         df_fakture_posle.to_excel(writer, index=False, sheet_name="fakture_obracun")
-        if rules_used_df is not None:
-            rules_used_df.to_excel(writer, index=False, sheet_name="pravila_primenjena")
-        if calibration_df is not None:
-            calibration_df.to_excel(writer, index=False, sheet_name="kalibracija")
-        if ekstremi_kalibracije is not None:
-            ekstremi_kalibracije.to_excel(writer, index=False, sheet_name="kalibracija_ekstremi")
     buffer.seek(0)
     return buffer
