@@ -1,4 +1,5 @@
 import re
+import io
 import numpy as np
 import pandas as pd
 
@@ -16,31 +17,16 @@ def norm_text(s):
 def norm_unit(u):
     u = norm_text(u)
     repl = {
-        "m^2": "m2",
-        "m²": "m2",
-        "m^1": "m",
-        "m¹": "m",
-        "m1": "m",
-        "kom (rolni)": "kom",
-        "kom (rolna)": "kom",
-        "kom (pak)": "kom",
+        "m^2": "m2", "m²": "m2",
+        "m^1": "m",  "m¹": "m", "m1": "m",
+        "kom (rolni)": "kom", "kom (rolna)": "kom", "kom (pak)": "kom",
         "kg.": "kg",
-        "l": "lit",
-        "litar": "lit",
-        "litra": "lit",
-        "litara": "lit",
-        "džak": "dzak",
-        "djak": "dzak",
+        "l": "lit", "litar": "lit", "litra": "lit", "litara": "lit",
+        "džak": "dzak", "djak": "dzak",
         "rolni": "rolna",
         "kom rupa": "kom",
     }
     return repl.get(u, u)
-
-
-def canon_mat(name: str) -> str:
-    """Kanonizacija imena materijala preko alias mape."""
-    k = norm_text(name)
-    return ALIASES.get(k, k)
 
 
 # ======================================================
@@ -55,18 +41,48 @@ same_unit_markup = {
     "poliesterska tkanina filc 100%, rolna 2x1m": 0.10,
 }
 
+
 # ======================================================
-# 3) Helper pravila – svako ima _rule_desc za pregled
+# 3) Helper pravila – svaki rule nosi _meta + _rule_desc
 # ======================================================
+
+def _attach_meta(fn, rule_type, from_unit, to_unit, factor=None, extra=None, enabled=True):
+    fn._meta = {
+        "rule_type": rule_type,
+        "from_unit": from_unit,
+        "to_unit": to_unit,
+        "factor": factor,
+        "extra": extra,
+        "enabled": enabled
+    }
+    # lep opis
+    if rule_type in ("factor_per", "factor_per_len"):
+        fn._rule_desc = f"{rule_type}: {factor} {to_unit}/{from_unit}"
+    elif rule_type == "per_piece":
+        fn._rule_desc = f"per_piece: {factor} {to_unit}/kom"
+    elif rule_type == "identity":
+        fn._rule_desc = f"identity: {from_unit}->{to_unit}"
+    elif rule_type == "m2_to_rolna":
+        fn._rule_desc = f"m2_to_rolna: {factor} m2/rolna, +{int((extra or 0)*100)}%"
+    elif rule_type == "m_to_rolna":
+        fn._rule_desc = f"m_to_rolna: {factor} m/rolna, +{int((extra or 0)*100)}%"
+    elif rule_type == "m2_to_lit":
+        fn._rule_desc = f"m2_to_lit: {factor} lit/m2"
+    elif rule_type == "m_to_lit":
+        fn._rule_desc = f"m_to_lit: {factor} lit/m"
+    elif rule_type == "kg_to_dzak":
+        fn._rule_desc = f"kg_to_dzak: 1/{factor} dzak/kg"
+    else:
+        fn._rule_desc = rule_type
+    return fn
+
 
 def rule_factor_per(area_unit, out_unit, factor):
     def _f(q, uf, ul):
         if norm_unit(uf) != area_unit or norm_unit(ul) != out_unit:
             return None, f"pravilo_ne_važi({uf}->{ul})"
         return q * factor, f"factor {factor} {out_unit}/{area_unit}"
-
-    _f._rule_desc = f"factor_per: {factor} {out_unit}/{area_unit}"
-    return _f
+    return _attach_meta(_f, "factor_per", area_unit, out_unit, factor=factor)
 
 
 def rule_factor_per_len(len_unit, out_unit, factor):
@@ -74,9 +90,7 @@ def rule_factor_per_len(len_unit, out_unit, factor):
         if norm_unit(uf) != len_unit or norm_unit(ul) != out_unit:
             return None, f"pravilo_ne_važi({uf}->{ul})"
         return q * factor, f"factor {factor} {out_unit}/{len_unit}"
-
-    _f._rule_desc = f"factor_per_len: {factor} {out_unit}/{len_unit}"
-    return _f
+    return _attach_meta(_f, "factor_per_len", len_unit, out_unit, factor=factor)
 
 
 def rule_per_piece(out_unit, factor):
@@ -84,9 +98,15 @@ def rule_per_piece(out_unit, factor):
         if norm_unit(uf) != "kom" or norm_unit(ul) != out_unit:
             return None, f"pravilo_ne_važi({uf}->{ul})"
         return q * factor, f"{factor} {out_unit}/kom"
+    return _attach_meta(_f, "per_piece", "kom", out_unit, factor=factor)
 
-    _f._rule_desc = f"per_piece: {factor} {out_unit}/kom"
-    return _f
+
+def rule_identity(from_unit, to_unit):
+    def _f(q, uf, ul):
+        if norm_unit(uf) != from_unit or norm_unit(ul) != to_unit:
+            return None, f"pravilo_ne_važi({uf}->{ul})"
+        return q, f"1:1 {from_unit}->{to_unit}"
+    return _attach_meta(_f, "identity", from_unit, to_unit, factor=None)
 
 
 def rule_m2_to_rolna(m2_per_rolna, extra=0.0):
@@ -95,45 +115,7 @@ def rule_m2_to_rolna(m2_per_rolna, extra=0.0):
             return None, f"pravilo_ne_važi({uf}->{ul})"
         rolls = (q / m2_per_rolna) * (1.0 + extra)
         return rolls, f"m2→rolna; {m2_per_rolna} m2/rolna; +{int(extra * 100)}%"
-
-    _f._rule_desc = f"m2_to_rolna: {m2_per_rolna} m2/rolna, +{int(extra*100)}%"
-    return _f
-
-
-def rule_piece_to_kg(kg_per_kom):
-    f = rule_per_piece("kg", kg_per_kom)
-    f._rule_desc = f"piece_to_kg: {kg_per_kom} kg/kom"
-    return f
-
-
-def rule_identity(from_unit, to_unit):
-    def _f(q, uf, ul):
-        if norm_unit(uf) != from_unit or norm_unit(ul) != to_unit:
-            return None, f"pravilo_ne_važi({uf}->{ul})"
-        return q, f"1:1 {from_unit}->{to_unit}"
-
-    _f._rule_desc = f"identity: {from_unit}->{to_unit}"
-    return _f
-
-
-def rule_m2_to_lit(liters_per_m2):
-    def _f(q, uf, ul):
-        if norm_unit(uf) != "m2" or norm_unit(ul) != "lit":
-            return None, f"pravilo_ne_važi({uf}->{ul})"
-        return q * liters_per_m2, f"{liters_per_m2} lit/m2"
-
-    _f._rule_desc = f"m2_to_lit: {liters_per_m2} lit/m2"
-    return _f
-
-
-def rule_m_to_lit(liters_per_m):
-    def _f(q, uf, ul):
-        if norm_unit(uf) != "m" or norm_unit(ul) != "lit":
-            return None, f"pravilo_ne_važi({uf}->{ul})"
-        return q * liters_per_m, f"{liters_per_m} lit/m"
-
-    _f._rule_desc = f"m_to_lit: {liters_per_m} lit/m"
-    return _f
+    return _attach_meta(_f, "m2_to_rolna", "m2", "rolna", factor=m2_per_rolna, extra=extra)
 
 
 def rule_m_to_rolna(m_per_rolna, extra=0.0):
@@ -142,9 +124,23 @@ def rule_m_to_rolna(m_per_rolna, extra=0.0):
             return None, f"pravilo_ne_važi({uf}->{ul})"
         rolls = (q / m_per_rolna) * (1.0 + extra)
         return rolls, f"m→rolna; {m_per_rolna} m/rolna; +{int(extra * 100)}%"
+    return _attach_meta(_f, "m_to_rolna", "m", "rolna", factor=m_per_rolna, extra=extra)
 
-    _f._rule_desc = f"m_to_rolna: {m_per_rolna} m/rolna, +{int(extra*100)}%"
-    return _f
+
+def rule_m2_to_lit(liters_per_m2):
+    def _f(q, uf, ul):
+        if norm_unit(uf) != "m2" or norm_unit(ul) != "lit":
+            return None, f"pravilo_ne_važi({uf}->{ul})"
+        return q * liters_per_m2, f"{liters_per_m2} lit/m2"
+    return _attach_meta(_f, "m2_to_lit", "m2", "lit", factor=liters_per_m2)
+
+
+def rule_m_to_lit(liters_per_m):
+    def _f(q, uf, ul):
+        if norm_unit(uf) != "m" or norm_unit(ul) != "lit":
+            return None, f"pravilo_ne_važi({uf}->{ul})"
+        return q * liters_per_m, f"{liters_per_m} lit/m"
+    return _attach_meta(_f, "m_to_lit", "m", "lit", factor=liters_per_m)
 
 
 def rule_kg_to_dzak(kg_per_dzak):
@@ -152,112 +148,83 @@ def rule_kg_to_dzak(kg_per_dzak):
         if norm_unit(uf) != "kg" or norm_unit(ul) != "dzak":
             return None, f"pravilo_ne_važi({uf}->{ul})"
         return q / kg_per_dzak, f"1/{kg_per_dzak} dzak/kg"
-
-    _f._rule_desc = f"kg_to_dzak: 1/{kg_per_dzak} dzak/kg"
-    return _f
+    return _attach_meta(_f, "kg_to_dzak", "kg", "dzak", factor=kg_per_dzak)
 
 
 # ======================================================
-# 4) Osnovne norme – material_rules + extend_rules
+# 4) Pravila: material_rules + alias
 # ======================================================
 
 material_rules = {}
-
 
 def extend_rules(name, rules_to_add):
     key = norm_text(name)
     material_rules.setdefault(key, []).extend(rules_to_add)
 
 
-# -- osnovna pravila iz tvog koda --
-extend_rules("alchimica aqua smart dur 2k",
-             [rule_factor_per("m2", "kg", 0.20)])
-extend_rules("hyperdesmo pb 2k a+b, 20+20lit",
-             [rule_factor_per("m2", "kg", 3)])
-extend_rules("alchimica water foam 1k lv",
-             [rule_piece_to_kg(0.3)])
-extend_rules("waterfoam catalyst 1 kg",
-             [rule_per_piece("kg", 0.015)])
-extend_rules("aquasmart - pb 1k 10kg, kg",
-             [rule_factor_per("m2", "kg", 1.5),
-              rule_factor_per_len("m", "kg", 0.7)])
-extend_rules("borner gebortol vs",
-             [rule_factor_per("m2", "kg", 0.4)])
-extend_rules("cold cure polyurea 2k  a+b",
-             [rule_factor_per("m2", "kg", 2.0)])
-extend_rules("dual seal 15mil lg 8,92m2 rolna",
-             [rule_m2_to_rolna(8.92, extra=0.20)])
+ALIASES = {
+    norm_text("Auqa Smart DUR 2k, 4+4kg"): norm_text("alchimica aqua smart dur 2k"),
+}
 
-extend_rules("hydrobloc 575 integral - 1k pu resin elastic 6.5kg",
-             [rule_piece_to_kg(0.3)])
-extend_rules("hydrocat 514 - highly active accelerator",
-             [rule_piece_to_kg(0.002)])
-extend_rules("hydrobloc 510 - second-foam",
-             [rule_piece_to_kg(0.3)])
+def canon_mat(name: str) -> str:
+    k = norm_text(name)
+    return ALIASES.get(k, k)
 
-extend_rules("hyperdesmo -  ady-e 4lit",
-             [rule_factor_per("m2", "kg", 0.15)])
-extend_rules("hyperdesmo grey 1k 25 kg kanta",
-             [rule_factor_per("m2", "kg", 2.5)])
-extend_rules("hyperseal 2k f, 12kg",
-             [rule_factor_per_len("m", "kg", 2.5)])
-extend_rules("illbruck pu901 600ml, kom",
-             [rule_per_piece("kg", 0.045)])
-extend_rules("microsealer pu, 20kg",
-             [rule_factor_per("m2", "kg", 0.4),
-              rule_factor_per_len("m", "kg", 0.2)])
-extend_rules("resin bau creck flex 2k a+b, 10+10.8kg",
-             [rule_piece_to_kg(0.3)])
-extend_rules("resin bau hydrogum, 20kg",
-             [rule_piece_to_kg(0.3)])
-extend_rules("resin bau water stopper 20kg comp a, 1,4kg comp b",
-             [rule_piece_to_kg(0.3)])
-extend_rules("stopaq 2100 aquastop 0,53kg, kom",
-             [rule_piece_to_kg(0.003)])
 
-extend_rules("vandex am 10, 20kg džak",
-             [rule_factor_per("m3", "kg", 6.0)])
-extend_rules("vandex bb 75, 25kg",
-             [rule_factor_per("m2", "kg", 3.4)])
-extend_rules("vandex cemelast liquid 9kg",
-             [rule_factor_per("m2", "kg", 3.4)])
-extend_rules("vandex injection mortar (vim) 25kg",
-             [rule_piece_to_kg(0.11)])
-extend_rules("vandex plug, 15kg kanta",
-             [])
-extend_rules("vandex uni moratar 1z 25kg",
-             [rule_factor_per_len("m", "kg", 5.0),
-              rule_piece_to_kg(0.5)])
-extend_rules("yapseal 106, komp a, 20kg",
-             [rule_factor_per("m2", "kg", 3.5)])
-extend_rules("yapseal 106, komp b, 10kg",
-             [rule_factor_per("m2", "kg", 1.75)])
+# --- osnovna pravila ---
+extend_rules("alchimica aqua smart dur 2k", [rule_factor_per("m2", "kg", 0.20)])
+extend_rules("hyperdesmo pb 2k a+b, 20+20lit", [rule_factor_per("m2", "kg", 3)])
+extend_rules("alchimica water foam 1k lv", [rule_per_piece("kg", 0.3)])
+extend_rules("waterfoam catalyst 1 kg", [rule_per_piece("kg", 0.015)])
+extend_rules("aquasmart - pb 1k 10kg, kg", [rule_factor_per("m2", "kg", 1.5), rule_factor_per_len("m", "kg", 0.7)])
+extend_rules("borner gebortol vs", [rule_factor_per("m2", "kg", 0.4)])
+extend_rules("cold cure polyurea 2k  a+b", [rule_factor_per("m2", "kg", 2.0)])
+extend_rules("dual seal 15mil lg 8,92m2 rolna", [rule_m2_to_rolna(8.92, extra=0.20)])
+
+extend_rules("hydrobloc 575 integral - 1k pu resin elastic 6.5kg", [rule_per_piece("kg", 0.3)])
+extend_rules("hydrocat 514 - highly active accelerator", [rule_per_piece("kg", 0.002)])
+extend_rules("hydrobloc 510 - second-foam", [rule_per_piece("kg", 0.3)])
+
+extend_rules("hyperdesmo -  ady-e 4lit", [rule_factor_per("m2", "kg", 0.15)])
+extend_rules("hyperdesmo grey 1k 25 kg kanta", [rule_factor_per("m2", "kg", 2.5)])
+extend_rules("hyperseal 2k f, 12kg", [rule_factor_per_len("m", "kg", 2.5)])
+extend_rules("illbruck pu901 600ml, kom", [rule_per_piece("kg", 0.045)])
+extend_rules("microsealer pu, 20kg", [rule_factor_per("m2", "kg", 0.4), rule_factor_per_len("m", "kg", 0.2)])
+extend_rules("resin bau creck flex 2k a+b, 10+10.8kg", [rule_per_piece("kg", 0.3)])
+extend_rules("resin bau hydrogum, 20kg", [rule_per_piece("kg", 0.3)])
+extend_rules("resin bau water stopper 20kg comp a, 1,4kg comp b", [rule_per_piece("kg", 0.3)])
+extend_rules("stopaq 2100 aquastop 0,53kg, kom", [rule_per_piece("kg", 0.003)])
+
+extend_rules("vandex am 10, 20kg džak", [rule_factor_per("m3", "kg", 6.0)])
+extend_rules("vandex bb 75, 25kg", [rule_factor_per("m2", "kg", 3.4)])
+extend_rules("vandex cemelast liquid 9kg", [rule_factor_per("m2", "kg", 3.4)])
+extend_rules("vandex injection mortar (vim) 25kg", [rule_per_piece("kg", 0.11)])
+extend_rules("vandex plug, 15kg kanta", [])
+extend_rules("vandex uni moratar 1z 25kg", [rule_factor_per_len("m", "kg", 5.0), rule_per_piece("kg", 0.5)])
+extend_rules("yapseal 106, komp a, 20kg", [rule_factor_per("m2", "kg", 3.5)])
+extend_rules("yapseal 106, komp b, 10kg", [rule_factor_per("m2", "kg", 1.75)])
+
 
 # ======================================================
 # 5) Proširenja i konstante
 # ======================================================
 
 PB2K_DENSITY_KG_PER_L = 1.15
-PB2K_LIT_PER_M2 = round(2.4 / PB2K_DENSITY_KG_PER_L, 3)  # ≈ 2.087 L/m2
+PB2K_LIT_PER_M2 = round(2.4 / PB2K_DENSITY_KG_PER_L, 3)  # ≈ 2.087
+
 ME508_3x25m_ROLL_LENGTH_M = 25
 ME508_4x50m_ROLL_LENGTH_M = 50
 CEMFLEX_PLATE_M_PER_KOM = 2
 OMEGA_HOLDERS_PER_PAK = 100
 OMEGA_HOLDERS_PER_M = 5
-OMEGA_PAK_PER_M = OMEGA_HOLDERS_PER_M / OMEGA_HOLDERS_PER_PAK  # 0.05
+OMEGA_PAK_PER_M = OMEGA_HOLDERS_PER_M / OMEGA_HOLDERS_PER_PAK
 VANDEX_PLUG_KG_PER_KOM = 0.1
 VOLGRIP_WIDTH_M = 0.10
 DUR2K_KG_PER_KOM = 0.20
 DUR2K_KG_PER_M = 0.20
 DUALSEAL_STD_M_PER_ROLNA = 8.92
 
-
-ALIASES = {
-    norm_text("Auqa Smart DUR 2k, 4+4kg"): norm_text("alchimica aqua smart dur 2k"),
-}
-
-
-# dodatna pravila i override-i
+# dodatna pravila
 extend_rules("Cleaner, 5kg", [rule_per_piece("kg", 0.025)])
 
 extend_rules("ILLBRUCK PU901 600ml, kom", [
@@ -281,9 +248,6 @@ extend_rules("Auqa Smart DUR 2k, 4+4kg", [
     rule_factor_per_len("m", "kg", DUR2K_KG_PER_M),
     rule_per_piece("kg", DUR2K_KG_PER_KOM),
 ])
-extend_rules("alchimica aqua smart dur 2k", [
-    rule_factor_per("m2", "kg", 0.20),
-])
 
 extend_rules("HYPERDESMO PB 2K A+B, 20+20lit", [
     rule_m2_to_lit(PB2K_LIT_PER_M2),
@@ -294,6 +258,7 @@ extend_rules("Alumanation 301 FT, kanta", [rule_identity("kom", "kanta")])
 
 extend_rules("CemFLEX VB Coated Steel Plate  15cm X 2m",
              [rule_per_piece("m", CEMFLEX_PLATE_M_PER_KOM)])
+
 extend_rules("CemFLEX VB Omega holder  100kom pak", [
     rule_per_piece("pak", 1 / OMEGA_HOLDERS_PER_PAK),
     rule_factor_per_len("m", "pak", OMEGA_PAK_PER_M),
@@ -340,19 +305,16 @@ material_rules[_dual_par_key] = [
     rule_identity("kom", "dzak"),
 ]
 
+
 # ======================================================
-# 6) Injektiranje aktivnih prodora – recepti
+# 6) Injektiranje – recepti
 # ======================================================
 
-def _n(s):
-    return norm_text(s)
-
+def _n(s): return norm_text(s)
 
 INJEKT_TRIGGER = _n("Injektiranje aktivnih prodora")
 
-INJEKT_RECEPT_DEFAULT = {
-    _n("ALU Packer 10/100 mm, kom"): (1.0, "kom")
-}
+INJEKT_RECEPT_DEFAULT = {_n("ALU Packer 10/100 mm, kom"): (1.0, "kom")}
 
 INJEKT_RECEPT_BY_RACUN = {
     _n("03-25"): {
@@ -402,15 +364,9 @@ def _broj_pakera_po_setu(df):
         g["_jm_norm"] = g["Jedinica mere za fakturisanje"].map(norm_unit)
         alu_mask = g["_mat_norm"].eq(_n("ALU Packer 10/100 mm, kom"))
         if alu_mask.any():
-            base = pd.to_numeric(
-                g.loc[alu_mask, "Količina za fakturisanje"],
-                errors="coerce"
-            ).max()
+            base = pd.to_numeric(g.loc[alu_mask, "Količina za fakturisanje"], errors="coerce").max()
         else:
-            base = pd.to_numeric(
-                g.loc[g["_jm_norm"].eq("kom"), "Količina za fakturisanje"],
-                errors="coerce"
-            ).max()
+            base = pd.to_numeric(g.loc[g["_jm_norm"].eq("kom"), "Količina za fakturisanje"], errors="coerce").max()
         brojevi[_n(racun)] = base if pd.notna(base) else None
     return brojevi
 
@@ -455,7 +411,6 @@ def _override_sanacija(row, mat, uf, ul):
 
 pair_defaults = {("m2", "kg"): 1.5, ("m", "kg"): 0.30, ("kom", "kg"): 0.30}
 
-
 def make_heur_rule(uf, ul):
     uf = norm_unit(uf)
     ul = norm_unit(ul)
@@ -468,9 +423,10 @@ def make_heur_rule(uf, ul):
         return rule_factor_per_len("m", "kg", f)
     if (uf, ul) == ("kom", "kg"):
         return rule_per_piece("kg", f)
+    return None
 
 
-def calc_skidanje(row, broj_pakera_map):
+def calc_skidanje(row, broj_pakera_map, rules_dict):
     mat_raw = row["Materijal"]
     qty = row["Količina za fakturisanje"]
     u_fakt = row["Jedinica mere za fakturisanje"]
@@ -497,54 +453,17 @@ def calc_skidanje(row, broj_pakera_map):
             return pd.Series([base * (1 + add), f"same_unit +{int(add * 100)}%"])
         return pd.Series([base, "same_unit"])
 
-    rules = material_rules.get(mat, [])
+    rules = rules_dict.get(mat, [])
     if not rules:
         return pd.Series([pd.NA, f"nema_pravila({u_fakt}->{u_lager})"])
 
     for r in rules:
+        meta = getattr(r, "_meta", {})
+        if meta and meta.get("enabled") is False:
+            continue
         out, note = r(qty, uf, ul)
         if out is not None:
             return pd.Series([out, f"rule: {note}"])
-
-    return pd.Series([pd.NA, f"pravilo_ne_pokriva({u_fakt}->{u_lager})"])
-
-
-def calc_skidanje_all(row, broj_pakera_map, material_rules_all):
-    mat_raw = row["Materijal"]
-    qty = row["Količina za fakturisanje"]
-    u_fakt = row["Jedinica mere za fakturisanje"]
-    u_lager = row["Jedinica mere za lager - skidanje količine"]
-    if pd.isna(mat_raw) or pd.isna(qty) or pd.isna(u_fakt) or pd.isna(u_lager):
-        return pd.Series([pd.NA, "nedostaju_podaci"])
-
-    mat = canon_mat(mat_raw)
-    uf = norm_unit(u_fakt)
-    ul = norm_unit(u_lager)
-
-    out, note = _override_injekt(row, mat, uf, ul, broj_pakera_map)
-    if out is not None:
-        return pd.Series([out, note])
-
-    out, note = _override_sanacija(row, mat, uf, ul)
-    if out is not None:
-        return pd.Series([out, note])
-
-    if uf == ul:
-        base = qty
-        add = same_unit_markup.get(mat, 0.0)
-        if add:
-            return pd.Series([base * (1 + add), f"same_unit +{int(add * 100)}%"])
-        return pd.Series([base, "same_unit"])
-
-    rules = material_rules_all.get(mat, [])
-    if not rules:
-        return pd.Series([pd.NA, f"nema_pravila({u_fakt}->{u_lager})"])
-
-    for r in rules:
-        out, note = r(qty, uf, ul)
-        if out is not None:
-            tag = "heur" if (mat in material_rules_all and r not in material_rules.get(mat, [])) else "rule"
-            return pd.Series([out, f"{tag}: {note}"])
 
     return pd.Series([pd.NA, f"pravilo_ne_pokriva({u_fakt}->{u_lager})"])
 
@@ -559,7 +478,6 @@ def _n2(s):
     s = str(s).lower().strip()
     return re.sub(r"\s+", " ", s)
 
-
 flex_materials = {
     _n2("ALCHIMICA Water Foam 1K"),
     _n2("HydroBloc 575 Integral - 1K PU Resin Elastic 6.5kg"),
@@ -568,9 +486,9 @@ flex_materials = {
     _n2("RESIN BAU HydroGum, 20kg"),
     _n2("RESIN BAU Water Stopper 20kg COMP A, 1,4kg comp B"),
 }
+
 DEFAULT_MIN, DEFAULT_MAX = 0.5, 2.0
 FLEX_MIN, FLEX_MAX = 0.1, 5.0
-
 
 def _calc_coef(row):
     pot, lag = row["Ukupna_potrošnja"], row["Stanje_na_lageru"]
@@ -586,29 +504,133 @@ def _calc_coef(row):
 
 
 # ======================================================
-# 10) Glavna funkcija – procesiraj_obracun
+# 10) RULES <-> DF (za pravi editor)
 # ======================================================
 
-def procesiraj_obracun(lager_file, fakture_file):
+RULE_TYPES = [
+    "factor_per",
+    "factor_per_len",
+    "per_piece",
+    "identity",
+    "m2_to_rolna",
+    "m_to_rolna",
+    "m2_to_lit",
+    "m_to_lit",
+    "kg_to_dzak",
+]
+
+def rules_to_df(rules_dict):
+    rows = []
+    for mat, rules in rules_dict.items():
+        for idx, r in enumerate(rules, start=1):
+            meta = getattr(r, "_meta", None)
+            if not meta:
+                rows.append({
+                    "Materijal": mat,
+                    "rule_type": "factor_per",
+                    "from_unit": "",
+                    "to_unit": "",
+                    "factor": None,
+                    "extra": 0.0,
+                    "enabled": True,
+                })
+                continue
+            rows.append({
+                "Materijal": mat,
+                "rule_type": meta.get("rule_type", ""),
+                "from_unit": meta.get("from_unit", ""),
+                "to_unit": meta.get("to_unit", ""),
+                "factor": meta.get("factor", None),
+                "extra": meta.get("extra", 0.0),
+                "enabled": meta.get("enabled", True),
+            })
+    return pd.DataFrame(rows)
+
+
+def make_rule_from_row(row):
+    rt = row["rule_type"]
+    fu = row.get("from_unit", "")
+    tu = row.get("to_unit", "")
+    factor = row.get("factor", None)
+    extra = row.get("extra", 0.0)
+    enabled = bool(row.get("enabled", True))
+
+    if rt == "factor_per":
+        fn = rule_factor_per(fu, tu, float(factor))
+    elif rt == "factor_per_len":
+        fn = rule_factor_per_len(fu, tu, float(factor))
+    elif rt == "per_piece":
+        fn = rule_per_piece(tu, float(factor))
+    elif rt == "identity":
+        fn = rule_identity(fu, tu)
+    elif rt == "m2_to_rolna":
+        fn = rule_m2_to_rolna(float(factor), extra=float(extra))
+    elif rt == "m_to_rolna":
+        fn = rule_m_to_rolna(float(factor), extra=float(extra))
+    elif rt == "m2_to_lit":
+        fn = rule_m2_to_lit(float(factor))
+    elif rt == "m_to_lit":
+        fn = rule_m_to_lit(float(factor))
+    elif rt == "kg_to_dzak":
+        fn = rule_kg_to_dzak(float(factor))
+    else:
+        return None
+
+    # override enabled
+    fn._meta["enabled"] = enabled
+    return fn
+
+
+def apply_rules_df(base_rules_dict, edited_df):
+    if edited_df is None or edited_df.empty:
+        return {k: v[:] for k, v in base_rules_dict.items()}
+
+    df = edited_df.copy()
+    for c in ["Materijal", "rule_type", "from_unit", "to_unit"]:
+        df[c] = df[c].fillna("").astype(str)
+    df["enabled"] = df["enabled"].fillna(True).astype(bool)
+    df["extra"] = pd.to_numeric(df["extra"], errors="coerce").fillna(0.0)
+    # factor može biti NaN za identity
+    if "factor" in df.columns:
+        df["factor"] = pd.to_numeric(df["factor"], errors="coerce")
+
+    out = {}
+    for mat, grp in df.groupby("Materijal", dropna=False):
+        rules = []
+        for _, r in grp.iterrows():
+            fn = make_rule_from_row(r.to_dict())
+            if fn is not None:
+                rules.append(fn)
+        out[mat] = rules
+
+    # zadrži materijale koji nisu u df (ako ih ima)
+    for mat, rules in base_rules_dict.items():
+        if mat not in out:
+            out[mat] = rules[:]
+    return out
+
+
+# ======================================================
+# 11) Glavna funkcija – procesiraj_obracun
+# ======================================================
+
+def procesiraj_obracun(lager_file, fakture_file, edited_rules_df=None):
     """
-    Glavna funkcija koju koristi Streamlit app.
-    Prima dva upload-ovana fajla (BytesIO) i vraća:
-      - uporedba (koeficijenti_i_uporedba)
-      - ekstremni (ekstremni materijali)
-      - df_fakture_posle (fakture sa kolonom 'Količina za skidanje sa lagera')
+    Prima dva upload-ovana fajla (BytesIO) i opciono edited_rules_df.
+    Vraća: uporedba, ekstremni, df_fakture_posle, rules_used_df
     """
-    # 0) Učitavanje Excel fajlova
     df_uvoz = pd.read_excel(lager_file)
     df_fakture = pd.read_excel(fakture_file)
 
-    # 1) Mapiranje JM iz df_uvoz u df_fakture
-    mapa_jedinica = df_uvoz.iloc[0].to_dict()
-    mapa_materijali = {col: mapa_jedinica[col] for col in df_uvoz.columns}
-    df_fakture["Jedinica mere za lager - skidanje količine"] = (
-        df_fakture["Materijal"].map(mapa_materijali)
-    )
+    # primeni editovana pravila (ako postoje)
+    base_rules = material_rules
+    rules_dict = apply_rules_df(base_rules, edited_rules_df)
 
-    # 2) Override problematičnih JM
+    # 1) mapiranje JM iz lagera
+    mapa_jedinica = df_uvoz.iloc[0].to_dict()
+    df_fakture["Jedinica mere za lager - skidanje količine"] = df_fakture["Materijal"].map(mapa_jedinica)
+
+    # 2) override JM
     mask_dual = df_fakture["Materijal"].map(norm_text).eq(_dual_par_key)
     df_fakture.loc[mask_dual, "Jedinica mere za lager - skidanje količine"] = "dzak"
 
@@ -618,74 +640,58 @@ def procesiraj_obracun(lager_file, fakture_file):
     mask_me4 = df_fakture["Materijal"].map(norm_text).eq(me508_4)
     df_fakture.loc[mask_me3 | mask_me4, "Jedinica mere za lager - skidanje količine"] = "kom"
 
-    # 3) Injekt – mapiranje broja pakera po računu
+    # 3) injekt map
     broj_pakera_map = _broj_pakera_po_setu(df_fakture)
 
-    # 4) Prvi prolaz
-    df_fakture_pre = df_fakture.copy()
-    df_fakture_pre[["Količina za skidanje sa lagera",
-                    "Napomena konverzije"]] = df_fakture_pre.apply(
-        lambda row: calc_skidanje(row, broj_pakera_map),
+    # 4) prvi prolaz
+    df_pre = df_fakture.copy()
+    df_pre[["Količina za skidanje sa lagera", "Napomena konverzije"]] = df_pre.apply(
+        lambda row: calc_skidanje(row, broj_pakera_map, rules_dict),
         axis=1
     )
-    neuspeh_pre = df_fakture_pre[df_fakture_pre["Količina za skidanje sa lagera"].isna()].copy()
+    neuspeh_pre = df_pre[df_pre["Količina za skidanje sa lagera"].isna()].copy()
 
-    # 5) Heuristike
-    material_rules_all = {k: v[:] for k, v in material_rules.items()}
-    for _, r in neuspeh_pre[[
-        "Materijal",
-        "Jedinica mere za fakturisanje",
-        "Jedinica mere za lager - skidanje količine"
-    ]].drop_duplicates().iterrows():
-        rr = make_heur_rule(r["Jedinica mere za fakturisanje"],
-                            r["Jedinica mere za lager - skidanje količine"])
+    # 5) heuristike (bazirano na rules_dict, ne global)
+    rules_all = {k: v[:] for k, v in rules_dict.items()}
+    for _, r in neuspeh_pre[["Materijal", "Jedinica mere za fakturisanje", "Jedinica mere za lager - skidanje količine"]].drop_duplicates().iterrows():
+        rr = make_heur_rule(r["Jedinica mere za fakturisanje"], r["Jedinica mere za lager - skidanje količine"])
         if rr is not None:
-            material_rules_all.setdefault(canon_mat(r["Materijal"]), []).append(rr)
+            rules_all.setdefault(canon_mat(r["Materijal"]), []).append(rr)
 
-    # 6) Drugi prolaz
-    df_fakture_posle = df_fakture.copy()
-    df_fakture_posle[["Količina za skidanje sa lagera",
-                      "Napomena konverzije"]] = df_fakture_posle.apply(
-        lambda row: calc_skidanje_all(row, broj_pakera_map, material_rules_all),
+    # 6) drugi prolaz
+    df_posle = df_fakture.copy()
+    df_posle[["Količina za skidanje sa lagera", "Napomena konverzije"]] = df_posle.apply(
+        lambda row: calc_skidanje(row, broj_pakera_map, rules_all),
         axis=1
     )
 
-    # 7) PB2K spec (m2/m -> lit)
+    # 7) PB2K spec m2/m -> lit (i dalje ostaje)
     PB2K_NAME_NORM = norm_text("HYPERDESMO PB 2K A+B, 20+20lit")
-    materijal_norm = df_fakture_posle["Materijal"].map(norm_text)
-    jm_fakt_norm = df_fakture_posle["Jedinica mere za fakturisanje"].map(norm_unit)
-    jm_lager_norm = df_fakture_posle["Jedinica mere za lager - skidanje količine"].map(norm_unit)
+    materijal_norm = df_posle["Materijal"].map(norm_text)
+    jm_fakt_norm = df_posle["Jedinica mere za fakturisanje"].map(norm_unit)
+    jm_lager_norm = df_posle["Jedinica mere za lager - skidanje količine"].map(norm_unit)
 
     mask_pb2k = materijal_norm.eq(PB2K_NAME_NORM)
     mask_pb2k_m2 = mask_pb2k & jm_fakt_norm.eq("m2") & jm_lager_norm.eq("lit")
-    df_fakture_posle.loc[mask_pb2k_m2, "Količina za skidanje sa lagera"] = (
-        pd.to_numeric(
-            df_fakture_posle.loc[mask_pb2k_m2, "Količina za fakturisanje"],
-            errors="coerce"
-        ) * PB2K_LIT_PER_M2
+    df_posle.loc[mask_pb2k_m2, "Količina za skidanje sa lagera"] = (
+        pd.to_numeric(df_posle.loc[mask_pb2k_m2, "Količina za fakturisanje"], errors="coerce") * PB2K_LIT_PER_M2
     )
     mask_pb2k_m = mask_pb2k & jm_fakt_norm.eq("m") & jm_lager_norm.eq("lit")
-    df_fakture_posle.loc[mask_pb2k_m, "Količina za skidanje sa lagera"] = (
-        pd.to_numeric(
-            df_fakture_posle.loc[mask_pb2k_m, "Količina za fakturisanje"],
-            errors="coerce"
-        ) * PB2K_LIT_PER_M2
+    df_posle.loc[mask_pb2k_m, "Količina za skidanje sa lagera"] = (
+        pd.to_numeric(df_posle.loc[mask_pb2k_m, "Količina za fakturisanje"], errors="coerce") * PB2K_LIT_PER_M2
     )
 
-    # Za 'kom' zaokruži
+    # kom -> round
     mask_kom_final = jm_lager_norm.eq("kom")
-    df_fakture_posle.loc[mask_kom_final, "Količina za skidanje sa lagera"] = pd.to_numeric(
-        df_fakture_posle.loc[mask_kom_final, "Količina za skidanje sa lagera"],
-        errors="coerce"
+    df_posle.loc[mask_kom_final, "Količina za skidanje sa lagera"] = pd.to_numeric(
+        df_posle.loc[mask_kom_final, "Količina za skidanje sa lagera"], errors="coerce"
     ).round(0)
 
-    # 8) SUME i uporedba
-    df_fakture_posle["Količina za skidanje sa lagera"] = pd.to_numeric(
-        df_fakture_posle["Količina za skidanje sa lagera"], errors="coerce"
-    )
+    # 8) uporedba
+    df_posle["Količina za skidanje sa lagera"] = pd.to_numeric(df_posle["Količina za skidanje sa lagera"], errors="coerce")
 
     potrosnja = (
-        df_fakture_posle.groupby("Materijal", dropna=False)["Količina za skidanje sa lagera"]
+        df_posle.groupby("Materijal", dropna=False)["Količina za skidanje sa lagera"]
         .sum(min_count=1)
         .reset_index()
         .rename(columns={"Količina za skidanje sa lagera": "Ukupna_potrošnja"})
@@ -693,48 +699,38 @@ def procesiraj_obracun(lager_file, fakture_file):
 
     lager_stanje = df_uvoz.iloc[1].to_frame().reset_index()
     lager_stanje.columns = ["Materijal", "Stanje_na_lageru"]
-    lager_stanje["Stanje_na_lageru"] = pd.to_numeric(
-        lager_stanje["Stanje_na_lageru"], errors="coerce"
-    )
+    lager_stanje["Stanje_na_lageru"] = pd.to_numeric(lager_stanje["Stanje_na_lageru"], errors="coerce")
 
     uporedba = pd.merge(potrosnja, lager_stanje, on="Materijal", how="outer")
     uporedba["Razlika_pre"] = uporedba["Stanje_na_lageru"] - uporedba["Ukupna_potrošnja"]
 
-    # 9) Koeficijenti
-    uporedba[["Koeficijent", "Coef_min", "Coef_max", "Flex", "Napomena_coef"]] = uporedba.apply(
-        _calc_coef, axis=1
-    )
-    ekstremni = uporedba[
-        uporedba["Napomena_coef"].str.contains("EKSTREMNO", na=False)
-    ].copy()
+    uporedba[["Koeficijent", "Coef_min", "Coef_max", "Flex", "Napomena_coef"]] = uporedba.apply(_calc_coef, axis=1)
+    ekstremni = uporedba[uporedba["Napomena_coef"].str.contains("EKSTREMNO", na=False)].copy()
 
-    return uporedba, ekstremni, df_fakture_posle
+    # pregled pravila koja su korišćena (za tab)
+    rules_used_df = rules_to_df(rules_dict)
+
+    return uporedba, ekstremni, df_posle, rules_used_df
 
 
 # ======================================================
-# 11) Pregled pravila – za Streamlit sidebar
+# 12) Pregled pravila – (read-only)
 # ======================================================
 
 def get_rules_overview():
-    """
-    Vrati DataFrame sa listom svih material_rules i kratkim opisom.
-    Ovo koristimo samo za pregled u sidebar-u.
-    """
     rows = []
     for mat, rules in material_rules.items():
         for idx, r in enumerate(rules, start=1):
             desc = getattr(r, "_rule_desc", r.__name__)
-            rows.append({
-                "Materijal (norm)": mat,
-                "Rule #": idx,
-                "Opis pravila": desc,
-            })
+            rows.append({"Materijal (norm)": mat, "Rule #": idx, "Opis pravila": desc})
     return pd.DataFrame(rows)
 
-import io
+
+# ======================================================
+# 13) Export
+# ======================================================
 
 def export_to_excel(uporedba, ekstremni, df_fakture_posle):
-    """ Priprema fajla za download u Streamlit-u """
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         uporedba.to_excel(writer, index=False, sheet_name="koeficijenti_i_uporedba")
@@ -742,30 +738,3 @@ def export_to_excel(uporedba, ekstremni, df_fakture_posle):
         df_fakture_posle.to_excel(writer, index=False, sheet_name="fakture_obracun")
     buffer.seek(0)
     return buffer
-import streamlit as st
-
-def rules_editor_ui():
-    global material_rules  # radimo sa globalnim pravilima
-
-    # pretvorimo pravila u tabelu koja može da se edituje
-    data = []
-    for mat, rules in material_rules.items():
-        for r in rules:
-            desc = getattr(r, "_rule_desc", "manual_rule")
-            data.append({
-                "Materijal": mat,
-                "Opis": desc
-            })
-    df = pd.DataFrame(data)
-
-    edited_df = st.data_editor(
-        df,
-        use_container_width=True,
-        num_rows="dynamic",
-        height=300
-    )
-
-    if st.button("💾 Sačuvaj izmene"):
-        # Ovde čuvamo izmene -> kasnije možemo i import/export JSON
-        st.session_state["material_rules_edits"] = edited_df
-        st.success("✔ Pravila su sačuvana i biće primenjena na sledećem obračunu.")
