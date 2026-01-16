@@ -156,7 +156,15 @@ extend_rules("waterfoam catalyst 1 kg", [rule_per_piece("kg", 0.015)])
 extend_rules("aquasmart - pb 1k 10kg, kg", [rule_factor_per("m2", "kg", 1.5), rule_factor_per_len("m", "kg", 0.7)])
 extend_rules("borner gebortol vs", [rule_factor_per("m2", "kg", 0.4)])
 extend_rules("cold cure polyurea 2k  a+b", [rule_factor_per("m2", "kg", 2.0)])
-extend_rules("dual seal 15mil lg 8,92m2 rolna", [rule_m2_to_rolna(8.92, extra=0.20)])
+extend_rules("dual seal 15mil lg 8,92m2 rolna", [
+    # m2 → rolna (postojeće)
+    rule_m2_to_rolna(8.92, extra=0.20),
+
+    # ✅ NOVO PRAVILO: m → rolna
+    # 14 m = 1 rolna, +20% tolerancije
+    rule_m_to_rolna(14, extra=0.20),
+])
+
 
 extend_rules("hydrobloc 575 integral - 1k pu resin elastic 6.5kg", [rule_per_piece("kg", 0.3)])
 extend_rules("hydrocat 514 - highly active accelerator", [rule_per_piece("kg", 0.002)])
@@ -199,8 +207,7 @@ VANDEX_PLUG_KG_PER_KOM = 0.1
 VOLGRIP_WIDTH_M = 0.10
 DUR2K_KG_PER_KOM = 0.20
 DUR2K_KG_PER_M = 0.20
-DUALSEAL_STD_M_PER_ROLNA = 8.92
-
+DUALSEAL_STD_M_PER_ROLNA = 14
 extend_rules("Cleaner, 5kg", [rule_per_piece("kg", 0.025)])
 
 extend_rules("ILLBRUCK PU901 600ml, kom", [
