@@ -895,3 +895,86 @@ def export_to_excel(uporedba, df_fakture_posle, injekt_debug=None, audit_map=Non
 
     buffer.seek(0)
     return buffer
+
+
+from docx import Document
+from docx.shared import Pt
+from io import BytesIO
+import zipfile
+
+
+def generate_word_for_racun(df_fakture_posle, broj_racuna):
+    df = df_fakture_posle.copy()
+    df = df[df["Broj računa"] == broj_racuna]
+
+    cols = [
+        "Materijal",
+        "Količina za fakturisanje",
+        "Jedinica mere za fakturisanje",
+        "Kolicina za skidanje sa uracunatim Koef_novi za ovaj materijal",
+        "Jedinica mere za lager - skidanje količine",
+    ]
+    df = df[cols]
+
+    doc = Document()
+    doc.add_heading(f"Obračun potrošnje – Račun {broj_racuna}", level=1)
+
+    table = doc.add_table(rows=1, cols=len(cols))
+    table.style = "Table Grid"
+
+    # header
+    for i, col in enumerate(cols):
+        table.rows[0].cells[i].text = col
+
+    # data
+    for _, row in df.iterrows():
+        cells = table.add_row().cells
+        for i, col in enumerate(cols):
+            val = row[col]
+            cells[i].text = "" if pd.isna(val) else str(round(val, 6) if isinstance(val, float) else val)
+
+    buffer = BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+
+def generate_word_zip_all_racuni(df_fakture_posle):
+    buffer = BytesIO()
+
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for racun in sorted(df_fakture_posle["Broj računa"].dropna().unique()):
+            doc_buf = generate_word_for_racun(df_fakture_posle, racun)
+            zf.writestr(f"racun_{racun}.docx", doc_buf.getvalue())
+
+    buffer.seek(0)
+    return buffer
+
+def generate_excel_for_racun(df_fakture_posle, broj_racuna):
+    df = df_fakture_posle[df_fakture_posle["Broj računa"] == broj_racuna]
+
+    cols = [
+        "Materijal",
+        "Količina za fakturisanje",
+        "Jedinica mere za fakturisanje",
+        "Kolicina za skidanje sa uracunatim Koef_novi za ovaj materijal",
+        "Jedinica mere za lager - skidanje količine",
+    ]
+    df = df[cols]
+
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=f"Racun_{broj_racuna}")
+
+    buffer.seek(0)
+    return buffer
+def generate_excel_zip_all_racuni(df_fakture_posle):
+    buffer = BytesIO()
+
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for racun in sorted(df_fakture_posle["Broj računa"].dropna().unique()):
+            xls_buf = generate_excel_for_racun(df_fakture_posle, racun)
+            zf.writestr(f"racun_{racun}.xlsx", xls_buf.getvalue())
+
+    buffer.seek(0)
+    return buffer

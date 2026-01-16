@@ -7,8 +7,15 @@ from obracun import (
     rules_to_df,
     RULE_TYPES,
     export_to_excel,
-    material_rules
+    material_rules,
+
+    # ✅ NOVO – eksport po računu
+    generate_word_for_racun,
+    generate_word_zip_all_racuni,
+    generate_excel_for_racun,
+    generate_excel_zip_all_racuni
 )
+
 
 st.set_page_config(page_title="Obračun zaliha", layout="wide")
 st.title("📦 Obračun zaliha – Laser Lux")
@@ -154,7 +161,7 @@ injekt_debug = R["injekt_debug"]
 audit_map = R["audit_map"]
 sus_bad = R["sus_bad"]
 
-tab1, tab2, tab3, tab_map, tab_audit, tab4, tab5, tab6 = st.tabs(
+tab1, tab2, tab3, tab_map, tab_audit, tab4, tab5, tab6, tab7 = st.tabs(
     [
         "📌 Uporedba",
         "⚠ Ekstremi kalibracije",
@@ -163,7 +170,8 @@ tab1, tab2, tab3, tab_map, tab_audit, tab4, tab5, tab6 = st.tabs(
         "🧾 Audit (JM iste ≠ 1)",
         "🧮 Pravila (primenjena)",
         "📊 Grafikon",
-        "🧪 Injekt debug"
+        "🧪 Injekt debug",
+        "📄 Izvoz po računu"
     ]
 )
 
@@ -447,6 +455,56 @@ with tab6:
         st.info("Nema injekt računa ili nema magacin fajla.")
     else:
         st.dataframe(injekt_debug, use_container_width=True)
+
+with tab7:
+    st.subheader("📄 Izvoz dokumenata po računu")
+
+    racuni = sorted(df_fakture_posle["Broj računa"].dropna().unique())
+    selected_racun = st.selectbox("Izaberi broj računa", racuni)
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        word_buf = generate_word_for_racun(df_fakture_posle, selected_racun)
+        st.download_button(
+            "📄 Preuzmi Word (ovaj račun)",
+            data=word_buf,
+            file_name=f"racun_{selected_racun}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+
+    with c2:
+        xls_buf = generate_excel_for_racun(df_fakture_posle, selected_racun)
+        st.download_button(
+            "📊 Preuzmi Excel (ovaj račun)",
+            data=xls_buf,
+            file_name=f"racun_{selected_racun}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+    st.markdown("---")
+    st.subheader("📁 Grupni izvoz")
+
+    c3, c4 = st.columns(2)
+
+    with c3:
+        zip_word = generate_word_zip_all_racuni(df_fakture_posle)
+        st.download_button(
+            "📁 Word za SVE račune (ZIP)",
+            data=zip_word,
+            file_name="svi_racuni_word.zip",
+            mime="application/zip"
+        )
+
+    with c4:
+        zip_excel = generate_excel_zip_all_racuni(df_fakture_posle)
+        st.download_button(
+            "📁 Excel za SVE račune (ZIP)",
+            data=zip_excel,
+            file_name="svi_racuni_excel.zip",
+            mime="application/zip"
+        )
+
 
 # ======================================================
 # Download
