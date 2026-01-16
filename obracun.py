@@ -838,6 +838,24 @@ def procesiraj_obracun(lager_file, fakture_file, magacin_file=None, edited_rules
     )
     kalibracija_ekstremi = uporedba[uporedba["Kalibracija_status"].eq("EKSTREMNO")].copy()
 
+    # ======================================================
+    # ✅ NOVO: Količina za skidanje sa uracunatim Koef_novi (po materijalu)
+    # ======================================================
+    koef_map = uporedba.set_index("Materijal_key")["Koef_novi"].to_dict()
+    df_posle["_mat_key"] = df_posle["Materijal"].map(norm_text)  # stabilan ključ za join
+    df_posle["_koef_novi_mat"] = df_posle["_mat_key"].map(koef_map)
+
+    qs2 = pd.to_numeric(df_posle["Količina za skidanje sa lagera"], errors="coerce")
+    k2 = pd.to_numeric(df_posle["_koef_novi_mat"], errors="coerce")
+
+    df_posle["Kolicina za skidanje sa uracunatim Koef_novi za ovaj materijal"] = np.where(
+        k2.notna(),
+        qs2 * k2,
+        qs2  # ako nema Koef_novi, prepiši originalno skidanje
+    )
+
+    
+
     rules_used_df = rules_to_df(rules_dict)
 
     return uporedba, df_posle, rules_used_df, kalibracija_ekstremi, injekt_debug, audit_map, sus_bad
@@ -848,14 +866,25 @@ def procesiraj_obracun(lager_file, fakture_file, magacin_file=None, edited_rules
 
 def export_to_excel(uporedba, df_fakture_posle, injekt_debug=None, audit_map=None, sus_bad=None):
     buffer = io.BytesIO()
+
+    # ✅ filtriraj kolone iz fakture_obracun za export (isto kao UI)
+    drop_cols = [
+        "Napomena konverzije",
+        "_racun_key", "_mat_key", "_jm_lager", "_uf", "_ul",
+        "Koef_konverzije",
+        "_koef_novi_mat",
+    ]
+    fakture_export = df_fakture_posle.drop(columns=drop_cols, errors="ignore")
+
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         uporedba.to_excel(writer, index=False, sheet_name="uporedba")
-        df_fakture_posle.to_excel(writer, index=False, sheet_name="fakture_obracun")
+        fakture_export.to_excel(writer, index=False, sheet_name="fakture_obracun")
         if injekt_debug is not None and not injekt_debug.empty:
             injekt_debug.to_excel(writer, index=False, sheet_name="injekt_debug")
         if audit_map is not None and not audit_map.empty:
             audit_map.to_excel(writer, index=False, sheet_name="audit_map")
         if sus_bad is not None and not sus_bad.empty:
             sus_bad.to_excel(writer, index=False, sheet_name="audit_jm_same_bad")
+
     buffer.seek(0)
     return buffer

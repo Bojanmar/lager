@@ -255,9 +255,22 @@ with tab2:
 # ======================================================
 # TAB 3: Fakture
 # ======================================================
+# ======================================================
+# TAB 3: Fakture
+# ======================================================
 with tab3:
     st.subheader("Fakture – obračun količina za skidanje sa lagera")
-    st.dataframe(df_fakture_posle, use_container_width=True)
+
+    drop_cols = [
+        "Napomena konverzije",
+        "_racun_key", "_mat_key", "_jm_lager", "_uf", "_ul",
+        "Koef_konverzije",
+        "_koef_novi_mat",
+    ]
+
+    view_fakture = df_fakture_posle.drop(columns=drop_cols, errors="ignore")
+    st.dataframe(view_fakture, use_container_width=True)
+
 
 # ======================================================
 # TAB MAP: Mapiranje
