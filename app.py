@@ -98,9 +98,18 @@ with c2:
         st.sidebar.info("Vraćeno na podrazumevano.")
 
 st.sidebar.markdown("---")
+
+# Dugmad za obračun + brisanje rezultata
 run_calc = st.sidebar.button("🚀 Obračunaj zalihe", key="btn_run_calc")
 
-# --------------- Main area ---------------
+if st.sidebar.button("🧹 Obriši rezultat", key="btn_clear_results"):
+    st.session_state.pop("calc_results", None)
+    st.sidebar.success("Rezultat obrisan ✅")
+    st.rerun()
+
+# ======================================================
+# POKRETANJE OBRAČUNA (rezultat čuvamo u session_state)
+# ======================================================
 if run_calc:
     if not lager_file or not fakture_file:
         st.error("❌ Morate da uploadujete **lager** i **fakture**.")
@@ -117,307 +126,329 @@ if run_calc:
                 manual_map_df=manual_map_df
             )
 
+        st.session_state["calc_results"] = {
+            "uporedba": uporedba,
+            "df_fakture_posle": df_fakture_posle,
+            "rules_used_df": rules_used_df,
+            "kal_ekstremi": kal_ekstremi,
+            "injekt_debug": injekt_debug,
+            "audit_map": audit_map,
+            "sus_bad": sus_bad,
+        }
+
         st.success("✔ Obračun je završen.")
 
-        tab1, tab2, tab3, tab_map, tab_audit, tab4, tab5, tab6 = st.tabs(
-            [
-                "📌 Uporedba",
-                "⚠ Ekstremi kalibracije",
-                "📄 Fakture – obračun",
-                "🔎 Mapiranje IZLAZ↔LAGER",
-                "🧾 Audit (JM iste ≠ 1)",
-                "🧮 Pravila (primenjena)",
-                "📊 Grafikon",
-                "🧪 Injekt debug"
-            ]
-        )
-
-        # ======================================================
-        # TAB 1: Uporedba + FILTER + COUNTER BADGE
-        # ======================================================
-        with tab1:
-            st.subheader("Uporedba (ključne kolone + novi koef)")
-
-            show = uporedba.copy()
-            for c in ["Ukupna_potrošnja", "Stanje_na_lageru", "Razlika_pre", "Stanje_na_magacinu", "Finalna_potrošnja", "Koef_novi"]:
-                if c in show.columns:
-                    show[c] = pd.to_numeric(show[c], errors="coerce")
-
-            # state init
-            if "show_only_unmatched" not in st.session_state:
-                st.session_state.show_only_unmatched = False
-
-            # unmatched mask (ako postoji Match_u_lageru koristi, u suprotnom fallback)
-            if "Match_u_lageru" in show.columns:
-                unmatched_mask = (show["Match_u_lageru"] == False)
-            else:
-                unmatched_mask = show["Stanje_na_lageru"].isna() | show["Ukupna_potrošnja"].isna()
-
-            unmatched_count = int(unmatched_mask.sum())
-            total_count = int(len(show))
-
-            # COUNTER BADGES + FILTER
-            colA, colB, colC, colD = st.columns([2.0, 2.3, 2.2, 1.5])
-
-            with colA:
-                st.markdown(
-                    f"""
-                    <div style="display:inline-block;padding:6px 10px;border-radius:14px;
-                                background:#eef2ff;border:1px solid #c7d2fe;font-weight:600;">
-                        📦 Ukupno: {total_count}
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-
-            with colB:
-                st.markdown(
-                    f"""
-                    <div style="display:inline-block;padding:6px 10px;border-radius:14px;
-                                background:#fff7ed;border:1px solid #fed7aa;font-weight:600;">
-                        ⚠ Nematchovani: {unmatched_count}
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-
-            with colC:
-                st.session_state.show_only_unmatched = st.checkbox(
-                    "🔍 Samo nematchovani",
-                    value=st.session_state.show_only_unmatched,
-                    key="chk_only_unmatched_uporedba"
-                )
-
-            with colD:
-                if st.session_state.show_only_unmatched:
-                    if st.button("❌ Isključi", key="btn_disable_filter_uporedba"):
-                        st.session_state.show_only_unmatched = False
-                        st.rerun()
-
-            filtered_df = show.copy()
-            if st.session_state.show_only_unmatched:
-                filtered_df = filtered_df[unmatched_mask].copy()
-                if filtered_df.empty:
-                    st.warning("ℹ️ Nema nematchovanih stavki. Isključi filter da vidiš sve podatke.")
-
-            cols = [
-                "Materijal",
-                "Ukupna_potrošnja",
-                "Stanje_na_lageru",
-                "Razlika_pre",
-                "Stanje_na_magacinu",
-                "Koef_novi",
-                "Finalna_potrošnja",
-            ]
-            cols = [c for c in cols if c in filtered_df.columns]
-            st.dataframe(filtered_df[cols], use_container_width=True)
-
-        # ======================================================
-        # TAB 2: Ekstremi
-        # ======================================================
-        with tab2:
-            st.subheader("Ekstremi kalibracije (Koef_novi van očekivanog opsega)")
-            st.dataframe(kal_ekstremi, use_container_width=True)
-
-        # ======================================================
-        # TAB 3: Fakture
-        # ======================================================
-        with tab3:
-            st.subheader("Fakture – obračun količina za skidanje sa lagera")
-            st.dataframe(df_fakture_posle, use_container_width=True)
-
-        # ======================================================
-        # TAB MAP: Mapiranje + filteri + mapping editor
-        # ======================================================
-        with tab_map:
-            st.subheader("🔎 Provera mapiranja materijala i jedinica (IZLAZ ↔ LAGER)")
-
-            if audit_map is None or audit_map.empty:
-                st.info("Nema audit podataka.")
-            else:
-                fc1, fc2, fc3 = st.columns([1, 1, 2])
-                with fc1:
-                    only_missing = st.checkbox("Samo nematchovani", value=False, key="chk_map_only_missing")
-                with fc2:
-                    only_jm_mismatch = st.checkbox("Samo JM ne odgovara", value=False, key="chk_map_only_jm_mismatch")
-                with fc3:
-                    q = st.text_input("Pretraga (materijal)", value="", key="txt_map_search")
-
-                view = audit_map.copy()
-
-                if "Match_u_lageru" in view.columns and only_missing:
-                    view = view[view["Match_u_lageru"] == False]
-
-                if only_jm_mismatch and "JM_iste" in view.columns:
-                    view = view[(view["JM_iste"] == False) & (view["JM_fakt"].fillna("") != "")]
-
-                if q.strip():
-                    qq = q.strip().lower()
-                    if "Materijal_lager" in view.columns:
-                        view = view[
-                            view["Materijal"].astype(str).str.lower().str.contains(qq, na=False) |
-                            view["Materijal_lager"].astype(str).str.lower().str.contains(qq, na=False)
-                        ]
-                    else:
-                        view = view[view["Materijal"].astype(str).str.lower().str.contains(qq, na=False)]
-
-                cols = [
-                    "Materijal_original",
-                    "Materijal", "Materijal_lager", "Match_u_lageru",
-                    "Jedinica mere za fakturisanje", "Jedinica mere za lager - skidanje količine",
-                    "JM_fakt", "JM_lager_mapirana", "JM_iste",
-                    "Količina za fakturisanje", "Količina za skidanje sa lagera",
-                    "Napomena konverzije"
-                ]
-                cols = [c for c in cols if c in view.columns]
-                st.dataframe(view[cols], use_container_width=True)
-
-                st.markdown("---")
-                st.subheader("🔁 Ručno mapiranje nematchovanih (sačuvaj, pa ponovo Obračunaj)")
-
-                if "Match_u_lageru" in audit_map.columns:
-                    missing_unique = audit_map[audit_map["Match_u_lageru"] == False][["Materijal"]].drop_duplicates()
-                    missing_list = missing_unique["Materijal"].astype(str).tolist()
-                else:
-                    missing_list = []
-
-                if len(missing_list) == 0:
-                    st.success("Nema nematchovanih materijala ✅")
-                else:
-                    local_lager_options = sorted(audit_map["Materijal_lager"].dropna().unique().tolist()) if "Materijal_lager" in audit_map.columns else []
-                    if not local_lager_options:
-                        local_lager_options = lager_options
-
-                    mm2 = st.session_state["manual_map"].copy()
-                    if mm2.empty:
-                        mm2 = pd.DataFrame(columns=["Materijal_izlaz", "Materijal_lager"])
-
-                    existing = set(mm2["Materijal_izlaz"].astype(str).tolist()) if "Materijal_izlaz" in mm2.columns else set()
-
-                    rows_to_add = []
-                    for m in missing_list:
-                        if m not in existing:
-                            rows_to_add.append({"Materijal_izlaz": m, "Materijal_lager": ""})
-                    if rows_to_add:
-                        mm2 = pd.concat([mm2, pd.DataFrame(rows_to_add)], ignore_index=True)
-
-                    edited_mm2 = st.data_editor(
-                        mm2,
-                        use_container_width=True,
-                        num_rows="dynamic",
-                        column_config={
-                            "Materijal_izlaz": st.column_config.TextColumn("Materijal_izlaz", disabled=True),
-                            "Materijal_lager": st.column_config.SelectboxColumn("Materijal_lager", options=[""] + local_lager_options)
-                        },
-                        key="tab_map_manual_editor"
-                    )
-
-                    sm1, sm2 = st.columns(2)
-                    with sm1:
-                        if st.button("💾 Sačuvaj ručno mapiranje (iz ovog taba)", key="btn_save_mapping_tab"):
-                            st.session_state["manual_map"] = edited_mm2
-                            st.success("Sačuvano ✅ — sada klikni opet 'Obračunaj zalihe'.")
-                    with sm2:
-                        st.info("Tip: mapiraj na tačan naziv kolone iz lager fajla.")
-
-        # ======================================================
-        # TAB AUDIT: JM iste, koef != 1
-        # ======================================================
-        with tab_audit:
-            st.subheader("🧾 Audit: Jedinice su iste, a konverzija nije 1.0 (ne bi smelo)")
-
-            if sus_bad is None or sus_bad.empty:
-                st.success("Nema sumnjivih slučajeva ✅")
-            else:
-                ac1, ac2 = st.columns([1, 2])
-                with ac1:
-                    min_diff = st.number_input("Min odstupanje (|koef-1|)", value=0.001, step=0.001, key="audit_min_diff")
-                with ac2:
-                    qq = st.text_input("Pretraga (materijal)", value="", key="audit_search")
-
-                view = sus_bad.copy()
-                if "Koef_konverzije" in view.columns:
-                    view = view[(view["Koef_konverzije"] - 1.0).abs() >= float(min_diff)]
-
-                if qq.strip():
-                    qqq = qq.strip().lower()
-                    view = view[view["Materijal"].astype(str).str.lower().str.contains(qqq, na=False)]
-
-                cols = [
-                    "Materijal",
-                    "Jedinica mere za fakturisanje",
-                    "Jedinica mere za lager - skidanje količine",
-                    "Količina za fakturisanje",
-                    "Količina za skidanje sa lagera",
-                    "Koef_konverzije",
-                    "Napomena konverzije"
-                ]
-                cols = [c for c in cols if c in view.columns]
-                st.dataframe(view[cols], use_container_width=True)
-
-        # ======================================================
-        # TAB 4: Pravila
-        # ======================================================
-        with tab4:
-            st.subheader("Pravila konverzije (primenjena u ovom obračunu)")
-            st.dataframe(rules_used_df, use_container_width=True)
-
-        # ======================================================
-        # TAB 5: Grafikon
-        # ======================================================
-        with tab5:
-            st.subheader("Poređenje stanja na lageru i ukupne potrošnje po materijalu")
-            chart_df = uporedba.dropna(subset=["Materijal", "Stanje_na_lageru", "Ukupna_potrošnja"]).copy()
-            if len(chart_df) > 0:
-                max_items = st.slider(
-                    "Broj materijala na grafikonu (po razlici, apsolutna vrednost):",
-                    min_value=5,
-                    max_value=min(100, len(chart_df)),
-                    value=min(30, len(chart_df)),
-                    step=1,
-                    key="slider_max_items"
-                )
-                chart_df["Abs_diff"] = (chart_df["Stanje_na_lageru"] - chart_df["Ukupna_potrošnja"]).abs()
-                chart_df = chart_df.sort_values("Abs_diff", ascending=False).head(max_items)
-
-                fig = px.bar(
-                    chart_df,
-                    x="Materijal",
-                    y=["Stanje_na_lageru", "Ukupna_potrošnja"],
-                    barmode="group",
-                    title="Stanje na lageru vs ukupna potrošnja",
-                )
-                fig.update_layout(xaxis_tickangle=45, height=650, legend_title_text="Količina")
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("Nema dovoljno podataka za grafikon.")
-
-        # ======================================================
-        # TAB 6: Injekt debug
-        # ======================================================
-        with tab6:
-            st.subheader("Injekt debug (paketi: 1.0–1.8x da se uklopi na 31.12)")
-            if injekt_debug is None or injekt_debug.empty:
-                st.info("Nema injekt računa ili nema magacin fajla.")
-            else:
-                st.dataframe(injekt_debug, use_container_width=True)
-
-        # ======================================================
-        # Download
-        # ======================================================
-        st.subheader("📎 Preuzimanje Excel rezultata")
-        buffer = export_to_excel(
-            uporedba,
-            df_fakture_posle,
-            injekt_debug=injekt_debug,
-            audit_map=audit_map,
-            sus_bad=sus_bad
-        )
-        st.download_button(
-            label="💾 Preuzmi Excel rezultat",
-            data=buffer,
-            file_name="obracun_zaliha.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-else:
+# ======================================================
+# PRIKAZ UI: ako postoji rezultat u session_state, uvek ga prikazuj
+# ======================================================
+if "calc_results" not in st.session_state:
     st.info("⬅ Uploaduj fajlove i klikni na **'Obračunaj zalihe'**.")
+    st.stop()
+
+R = st.session_state["calc_results"]
+uporedba = R["uporedba"]
+df_fakture_posle = R["df_fakture_posle"]
+rules_used_df = R["rules_used_df"]
+kal_ekstremi = R["kal_ekstremi"]
+injekt_debug = R["injekt_debug"]
+audit_map = R["audit_map"]
+sus_bad = R["sus_bad"]
+
+tab1, tab2, tab3, tab_map, tab_audit, tab4, tab5, tab6 = st.tabs(
+    [
+        "📌 Uporedba",
+        "⚠ Ekstremi kalibracije",
+        "📄 Fakture – obračun",
+        "🔎 Mapiranje IZLAZ↔LAGER",
+        "🧾 Audit (JM iste ≠ 1)",
+        "🧮 Pravila (primenjena)",
+        "📊 Grafikon",
+        "🧪 Injekt debug"
+    ]
+)
+
+# ======================================================
+# TAB 1: Uporedba + FILTER + COUNTER BADGE (bez gubljenja stranice)
+# ======================================================
+with tab1:
+    st.subheader("Uporedba (ključne kolone + novi koef)")
+
+    show = uporedba.copy()
+    for c in ["Ukupna_potrošnja", "Stanje_na_lageru", "Razlika_pre", "Stanje_na_magacinu", "Finalna_potrošnja", "Koef_novi"]:
+        if c in show.columns:
+            show[c] = pd.to_numeric(show[c], errors="coerce")
+
+    if "show_only_unmatched" not in st.session_state:
+        st.session_state["show_only_unmatched"] = False
+
+    # unmatched mask
+    if "Match_u_lageru" in show.columns:
+        unmatched_mask = (show["Match_u_lageru"] == False)
+    else:
+        unmatched_mask = show["Stanje_na_lageru"].isna() | show["Ukupna_potrošnja"].isna()
+
+    unmatched_count = int(unmatched_mask.sum())
+    total_count = int(len(show))
+
+    colA, colB, colC, colD = st.columns([2.0, 2.3, 2.2, 1.5])
+
+    with colA:
+        st.markdown(
+            f"""
+            <div style="display:inline-block;padding:6px 10px;border-radius:14px;
+                        background:#eef2ff;border:1px solid #c7d2fe;font-weight:600;">
+                📦 Ukupno: {total_count}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    with colB:
+        st.markdown(
+            f"""
+            <div style="display:inline-block;padding:6px 10px;border-radius:14px;
+                        background:#fff7ed;border:1px solid #fed7aa;font-weight:600;">
+                ⚠ Nematchovani: {unmatched_count}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    with colC:
+        st.session_state["show_only_unmatched"] = st.checkbox(
+            "🔍 Samo nematchovani",
+            value=st.session_state["show_only_unmatched"],
+            key="chk_only_unmatched_uporedba"
+        )
+
+    with colD:
+        if st.session_state["show_only_unmatched"]:
+            if st.button("❌ Isključi", key="btn_disable_filter_uporedba"):
+                st.session_state["show_only_unmatched"] = False
+                st.rerun()
+
+    filtered_df = show.copy()
+    if st.session_state["show_only_unmatched"]:
+        filtered_df = filtered_df[unmatched_mask].copy()
+        if filtered_df.empty:
+            st.warning("ℹ️ Nema nematchovanih stavki. Isključi filter da vidiš sve podatke.")
+
+    cols = [
+        "Materijal",
+        "Ukupna_potrošnja",
+        "Stanje_na_lageru",
+        "Razlika_pre",
+        "Stanje_na_magacinu",
+        "Koef_novi",
+        "Finalna_potrošnja",
+    ]
+    cols = [c for c in cols if c in filtered_df.columns]
+    st.dataframe(filtered_df[cols], use_container_width=True)
+
+# ======================================================
+# TAB 2: Ekstremi
+# ======================================================
+with tab2:
+    st.subheader("Ekstremi kalibracije (Koef_novi van očekivanog opsega)")
+    st.dataframe(kal_ekstremi, use_container_width=True)
+
+# ======================================================
+# TAB 3: Fakture
+# ======================================================
+with tab3:
+    st.subheader("Fakture – obračun količina za skidanje sa lagera")
+    st.dataframe(df_fakture_posle, use_container_width=True)
+
+# ======================================================
+# TAB MAP: Mapiranje
+# ======================================================
+with tab_map:
+    st.subheader("🔎 Provera mapiranja materijala i jedinica (IZLAZ ↔ LAGER)")
+
+    if audit_map is None or audit_map.empty:
+        st.info("Nema audit podataka.")
+    else:
+        fc1, fc2, fc3 = st.columns([1, 1, 2])
+        with fc1:
+            only_missing = st.checkbox("Samo nematchovani", value=False, key="chk_map_only_missing")
+        with fc2:
+            only_jm_mismatch = st.checkbox("Samo JM ne odgovara", value=False, key="chk_map_only_jm_mismatch")
+        with fc3:
+            q = st.text_input("Pretraga (materijal)", value="", key="txt_map_search")
+
+        view = audit_map.copy()
+
+        if "Match_u_lageru" in view.columns and only_missing:
+            view = view[view["Match_u_lageru"] == False]
+
+        if only_jm_mismatch and "JM_iste" in view.columns:
+            view = view[(view["JM_iste"] == False) & (view["JM_fakt"].fillna("") != "")]
+
+        if q.strip():
+            qq = q.strip().lower()
+            if "Materijal_lager" in view.columns:
+                view = view[
+                    view["Materijal"].astype(str).str.lower().str.contains(qq, na=False) |
+                    view["Materijal_lager"].astype(str).str.lower().str.contains(qq, na=False)
+                ]
+            else:
+                view = view[view["Materijal"].astype(str).str.lower().str.contains(qq, na=False)]
+
+        cols = [
+            "Materijal_original",
+            "Materijal", "Materijal_lager", "Match_u_lageru",
+            "Jedinica mere za fakturisanje", "Jedinica mere za lager - skidanje količine",
+            "JM_fakt", "JM_lager_mapirana", "JM_iste",
+            "Količina za fakturisanje", "Količina za skidanje sa lagera",
+            "Napomena konverzije"
+        ]
+        cols = [c for c in cols if c in view.columns]
+        st.dataframe(view[cols], use_container_width=True)
+
+        st.markdown("---")
+        st.subheader("🔁 Ručno mapiranje nematchovanih (sačuvaj, pa ponovo Obračunaj)")
+
+        if "Match_u_lageru" in audit_map.columns:
+            missing_unique = audit_map[audit_map["Match_u_lageru"] == False][["Materijal"]].drop_duplicates()
+            missing_list = missing_unique["Materijal"].astype(str).tolist()
+        else:
+            missing_list = []
+
+        if len(missing_list) == 0:
+            st.success("Nema nematchovanih materijala ✅")
+        else:
+            local_lager_options = sorted(audit_map["Materijal_lager"].dropna().unique().tolist()) if "Materijal_lager" in audit_map.columns else []
+            if not local_lager_options:
+                local_lager_options = lager_options
+
+            mm2 = st.session_state["manual_map"].copy()
+            if mm2.empty:
+                mm2 = pd.DataFrame(columns=["Materijal_izlaz", "Materijal_lager"])
+
+            existing = set(mm2["Materijal_izlaz"].astype(str).tolist()) if "Materijal_izlaz" in mm2.columns else set()
+
+            rows_to_add = []
+            for m in missing_list:
+                if m not in existing:
+                    rows_to_add.append({"Materijal_izlaz": m, "Materijal_lager": ""})
+            if rows_to_add:
+                mm2 = pd.concat([mm2, pd.DataFrame(rows_to_add)], ignore_index=True)
+
+            edited_mm2 = st.data_editor(
+                mm2,
+                use_container_width=True,
+                num_rows="dynamic",
+                column_config={
+                    "Materijal_izlaz": st.column_config.TextColumn("Materijal_izlaz", disabled=True),
+                    "Materijal_lager": st.column_config.SelectboxColumn("Materijal_lager", options=[""] + local_lager_options)
+                },
+                key="tab_map_manual_editor"
+            )
+
+            sm1, sm2 = st.columns(2)
+            with sm1:
+                if st.button("💾 Sačuvaj ručno mapiranje (iz ovog taba)", key="btn_save_mapping_tab"):
+                    st.session_state["manual_map"] = edited_mm2
+                    st.success("Sačuvano ✅ — sada klikni opet 'Obračunaj zalihe'.")
+            with sm2:
+                st.info("Tip: mapiraj na tačan naziv kolone iz lager fajla.")
+
+# ======================================================
+# TAB AUDIT
+# ======================================================
+with tab_audit:
+    st.subheader("🧾 Audit: Jedinice su iste, a konverzija nije 1.0 (ne bi smelo)")
+
+    if sus_bad is None or sus_bad.empty:
+        st.success("Nema sumnjivih slučajeva ✅")
+    else:
+        ac1, ac2 = st.columns([1, 2])
+        with ac1:
+            min_diff = st.number_input("Min odstupanje (|koef-1|)", value=0.001, step=0.001, key="audit_min_diff")
+        with ac2:
+            qq = st.text_input("Pretraga (materijal)", value="", key="audit_search")
+
+        view = sus_bad.copy()
+        if "Koef_konverzije" in view.columns:
+            view = view[(view["Koef_konverzije"] - 1.0).abs() >= float(min_diff)]
+
+        if qq.strip():
+            qqq = qq.strip().lower()
+            view = view[view["Materijal"].astype(str).str.lower().str.contains(qqq, na=False)]
+
+        cols = [
+            "Materijal",
+            "Jedinica mere za fakturisanje",
+            "Jedinica mere za lager - skidanje količine",
+            "Količina za fakturisanje",
+            "Količina za skidanje sa lagera",
+            "Koef_konverzije",
+            "Napomena konverzije"
+        ]
+        cols = [c for c in cols if c in view.columns]
+        st.dataframe(view[cols], use_container_width=True)
+
+# ======================================================
+# TAB 4: Pravila
+# ======================================================
+with tab4:
+    st.subheader("Pravila konverzije (primenjena u ovom obračunu)")
+    st.dataframe(rules_used_df, use_container_width=True)
+
+# ======================================================
+# TAB 5: Grafikon
+# ======================================================
+with tab5:
+    st.subheader("Poređenje stanja na lageru i ukupne potrošnje po materijalu")
+    chart_df = uporedba.dropna(subset=["Materijal", "Stanje_na_lageru", "Ukupna_potrošnja"]).copy()
+    if len(chart_df) > 0:
+        max_items = st.slider(
+            "Broj materijala na grafikonu (po razlici, apsolutna vrednost):",
+            min_value=5,
+            max_value=min(100, len(chart_df)),
+            value=min(30, len(chart_df)),
+            step=1,
+            key="slider_max_items"
+        )
+        chart_df["Abs_diff"] = (chart_df["Stanje_na_lageru"] - chart_df["Ukupna_potrošnja"]).abs()
+        chart_df = chart_df.sort_values("Abs_diff", ascending=False).head(max_items)
+
+        fig = px.bar(
+            chart_df,
+            x="Materijal",
+            y=["Stanje_na_lageru", "Ukupna_potrošnja"],
+            barmode="group",
+            title="Stanje na lageru vs ukupna potrošnja",
+        )
+        fig.update_layout(xaxis_tickangle=45, height=650, legend_title_text="Količina")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Nema dovoljno podataka za grafikon.")
+
+# ======================================================
+# TAB 6: Injekt debug
+# ======================================================
+with tab6:
+    st.subheader("Injekt debug (paketi: 1.0–1.8x da se uklopi na 31.12)")
+    if injekt_debug is None or injekt_debug.empty:
+        st.info("Nema injekt računa ili nema magacin fajla.")
+    else:
+        st.dataframe(injekt_debug, use_container_width=True)
+
+# ======================================================
+# Download
+# ======================================================
+st.subheader("📎 Preuzimanje Excel rezultata")
+buffer = export_to_excel(
+    uporedba,
+    df_fakture_posle,
+    injekt_debug=injekt_debug,
+    audit_map=audit_map,
+    sus_bad=sus_bad
+)
+st.download_button(
+    label="💾 Preuzmi Excel rezultat",
+    data=buffer,
+    file_name="obracun_zaliha.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
