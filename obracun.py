@@ -898,45 +898,54 @@ def export_to_excel(uporedba, df_fakture_posle, injekt_debug=None, audit_map=Non
 
 
 from docx import Document
-from docx.shared import Pt
 from io import BytesIO
-import zipfile
-
+import pandas as pd
 
 def generate_word_for_racun(df_fakture_posle, broj_racuna):
     df = df_fakture_posle.copy()
-    df = df[df["Broj računa"] == broj_racuna]
+    df = df[df["Broj računa"] == broj_racuna].copy()
 
-    cols = [
-        "Materijal",
-        "Količina za fakturisanje",
-        "Jedinica mere za fakturisanje",
-        "Kolicina za skidanje sa uracunatim Koef_novi za ovaj materijal",
-        "Jedinica mere za lager - skidanje količine",
-    ]
-    df = df[cols]
+    # ✅ SAMO WORD: uzmi fakturisano iz "Normative" kolone (desna kolona sa slike)
+    fakt_col = "Količina za fakturisanje (ono što piše u tabeli za račune - Normative)"
+    fakt_jm_col = "Jedinica mere za fakturisanje – u računu"
+
+    df_out = pd.DataFrame({
+        "Materijal": df.get("Materijal"),
+        "Površina na koju je naneta – Fakturisana količina:": df.get(fakt_col),
+        "Jedinica": df.get(fakt_jm_col),
+        "Stvarna potrosnja": df.get("Kolicina za skidanje sa uracunatim Koef_novi za ovaj materijal"),
+        "Jedinica ": df.get("Jedinica mere za lager - skidanje količine"),
+    })
 
     doc = Document()
     doc.add_heading(f"Obračun potrošnje – Račun {broj_racuna}", level=1)
 
-    table = doc.add_table(rows=1, cols=len(cols))
+    table = doc.add_table(rows=1, cols=len(df_out.columns))
     table.style = "Table Grid"
 
     # header
-    for i, col in enumerate(cols):
+    for i, col in enumerate(df_out.columns):
         table.rows[0].cells[i].text = col
 
     # data
-    for _, row in df.iterrows():
+    for _, row in df_out.iterrows():
         cells = table.add_row().cells
-        for i, col in enumerate(cols):
+        for i, col in enumerate(df_out.columns):
             val = row[col]
-            cells[i].text = "" if pd.isna(val) else str(round(val, 6) if isinstance(val, float) else val)
+            if pd.isna(val):
+                cells[i].text = ""
+            else:
+                # format brojeva
+                if isinstance(val, (float, int)):
+                    cells[i].text = str(round(float(val), 6))
+                else:
+                    cells[i].text = str(val)
 
     buffer = BytesIO()
     doc.save(buffer)
     buffer.seek(0)
     return buffer
+
 
 
 def generate_word_zip_all_racuni(df_fakture_posle):
