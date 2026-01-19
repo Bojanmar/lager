@@ -9,13 +9,12 @@ from obracun import (
     export_to_excel,
     material_rules,
 
-    # ✅ NOVO – eksport po računu
+    # ✅ eksport po računu
     generate_word_for_racun,
     generate_word_zip_all_racuni,
     generate_excel_for_racun,
     generate_excel_zip_all_racuni
 )
-
 
 st.set_page_config(page_title="Obračun zaliha", layout="wide")
 st.title("📦 Obračun zaliha – Laser Lux")
@@ -161,24 +160,35 @@ injekt_debug = R["injekt_debug"]
 audit_map = R["audit_map"]
 sus_bad = R["sus_bad"]
 
+# ======================================================
+# ✅ NOVO: Pamćenje aktivnog taba (da ne skače na prvi)
+# ======================================================
+if "active_tab" not in st.session_state:
+    st.session_state["active_tab"] = 0
+
+tab_labels = [
+    "📌 Uporedba",
+    "⚠ Ekstremi kalibracije",
+    "📄 Fakture – obračun",
+    "🔎 Mapiranje IZLAZ↔LAGER",
+    "🧾 Audit (JM iste ≠ 1)",
+    "🧮 Pravila (primenjena)",
+    "📊 Grafikon",
+    "🧪 Injekt debug",
+    "📄 Izvoz po računu"
+]
+
 tab1, tab2, tab3, tab_map, tab_audit, tab4, tab5, tab6, tab7 = st.tabs(
-    [
-        "📌 Uporedba",
-        "⚠ Ekstremi kalibracije",
-        "📄 Fakture – obračun",
-        "🔎 Mapiranje IZLAZ↔LAGER",
-        "🧾 Audit (JM iste ≠ 1)",
-        "🧮 Pravila (primenjena)",
-        "📊 Grafikon",
-        "🧪 Injekt debug",
-        "📄 Izvoz po računu"
-    ]
+    tab_labels,
+    default_index=int(st.session_state["active_tab"])
 )
 
 # ======================================================
-# TAB 1: Uporedba + FILTER + COUNTER BADGE (bez gubljenja stranice)
+# TAB 1: Uporedba + FILTER + COUNTER BADGE
 # ======================================================
 with tab1:
+    st.session_state["active_tab"] = 0
+
     st.subheader("Uporedba (ključne kolone + novi koef)")
 
     show = uporedba.copy()
@@ -189,7 +199,6 @@ with tab1:
     if "show_only_unmatched" not in st.session_state:
         st.session_state["show_only_unmatched"] = False
 
-    # unmatched mask
     if "Match_u_lageru" in show.columns:
         unmatched_mask = (show["Match_u_lageru"] == False)
     else:
@@ -257,16 +266,17 @@ with tab1:
 # TAB 2: Ekstremi
 # ======================================================
 with tab2:
+    st.session_state["active_tab"] = 1
+
     st.subheader("Ekstremi kalibracije (Koef_novi van očekivanog opsega)")
     st.dataframe(kal_ekstremi, use_container_width=True)
 
 # ======================================================
 # TAB 3: Fakture
 # ======================================================
-# ======================================================
-# TAB 3: Fakture
-# ======================================================
 with tab3:
+    st.session_state["active_tab"] = 2
+
     st.subheader("Fakture – obračun količina za skidanje sa lagera")
 
     drop_cols = [
@@ -279,11 +289,12 @@ with tab3:
     view_fakture = df_fakture_posle.drop(columns=drop_cols, errors="ignore")
     st.dataframe(view_fakture, use_container_width=True)
 
-
 # ======================================================
 # TAB MAP: Mapiranje
 # ======================================================
 with tab_map:
+    st.session_state["active_tab"] = 3
+
     st.subheader("🔎 Provera mapiranja materijala i jedinica (IZLAZ ↔ LAGER)")
 
     if audit_map is None or audit_map.empty:
@@ -378,6 +389,8 @@ with tab_map:
 # TAB AUDIT
 # ======================================================
 with tab_audit:
+    st.session_state["active_tab"] = 4
+
     st.subheader("🧾 Audit: Jedinice su iste, a konverzija nije 1.0 (ne bi smelo)")
 
     if sus_bad is None or sus_bad.empty:
@@ -413,6 +426,8 @@ with tab_audit:
 # TAB 4: Pravila
 # ======================================================
 with tab4:
+    st.session_state["active_tab"] = 5
+
     st.subheader("Pravila konverzije (primenjena u ovom obračunu)")
     st.dataframe(rules_used_df, use_container_width=True)
 
@@ -420,6 +435,8 @@ with tab4:
 # TAB 5: Grafikon
 # ======================================================
 with tab5:
+    st.session_state["active_tab"] = 6
+
     st.subheader("Poređenje stanja na lageru i ukupne potrošnje po materijalu")
     chart_df = uporedba.dropna(subset=["Materijal", "Stanje_na_lageru", "Ukupna_potrošnja"]).copy()
     if len(chart_df) > 0:
@@ -450,13 +467,20 @@ with tab5:
 # TAB 6: Injekt debug
 # ======================================================
 with tab6:
+    st.session_state["active_tab"] = 7
+
     st.subheader("Injekt debug (paketi: 1.0–1.8x da se uklopi na 31.12)")
     if injekt_debug is None or injekt_debug.empty:
         st.info("Nema injekt računa ili nema magacin fajla.")
     else:
         st.dataframe(injekt_debug, use_container_width=True)
 
+# ======================================================
+# TAB 7: Izvoz po računu
+# ======================================================
 with tab7:
+    st.session_state["active_tab"] = 8
+
     st.subheader("📄 Izvoz dokumenata po računu")
 
     racuni = sorted(df_fakture_posle["Broj računa"].dropna().unique())
@@ -504,7 +528,6 @@ with tab7:
             file_name="svi_racuni_excel.zip",
             mime="application/zip"
         )
-
 
 # ======================================================
 # Download

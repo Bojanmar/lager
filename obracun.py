@@ -977,7 +977,7 @@ def generate_word_for_racun(df_fakture_posle, broj_racuna):
             table.rows[r_idx].cells[3].text = ""
         else:
             try:
-                table.rows[r_idx].cells[3].text = str(round(float(v), 6))
+                table.rows[r_idx].cells[3].text = str(round(float(v), 2))
             except Exception:
                 table.rows[r_idx].cells[3].text = str(v)
 
