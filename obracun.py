@@ -2,6 +2,8 @@ import re
 import io
 import numpy as np
 import pandas as pd
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 
 # ======================================================
 # 0) Safe Excel read (Streamlit UploadedFile seek fix)
@@ -921,18 +923,19 @@ def generate_word_for_racun(df_fakture_posle, broj_racuna):
     df = df[df["Broj računa"] == broj_racuna].copy()
 
     fakt_col = "Količina za fakturisanje (ono što piše u tabeli za račune - Normative)"
-    fakt_jm_col = "Jedinica mere za fakturisanje – u računu"
+    fakt_jm_col = "Jedinica mere za fakturisanje - u računu"
 
     # --- uzmi SVE vrednosti koje postoje u "Normative" koloni za taj račun (bez fallback-a)
     vals = pd.to_numeric(df.get(fakt_col), errors="coerce") if fakt_col in df.columns else pd.Series([], dtype=float)
     vals = vals.dropna().tolist()
 
-    jms = df.get(fakt_jm_col) if fakt_jm_col in df.columns else pd.Series([pd.NA]*len(df))
+    jms = df.get(fakt_jm_col) if fakt_jm_col in df.columns else pd.Series([pd.NA] * len(df))
     jms = jms.dropna().astype(str).str.strip()
     jms = [x for x in jms.tolist() if x != ""]
 
     # string koji ide u merged ćeliju (prazno ako nema ničega)
     normative_text = "\n".join([str(int(v)) if float(v).is_integer() else str(v) for v in vals]) if len(vals) else ""
+
     # za jedinicu uzmi unique (ako ih ima više, prikaži sve)
     jm_unique = []
     for u in jms:
@@ -988,18 +991,29 @@ def generate_word_for_racun(df_fakture_posle, broj_racuna):
         top_cell_qty = table.rows[1].cells[1]
         for rr in range(2, n_items + 1):
             top_cell_qty = top_cell_qty.merge(table.rows[rr].cells[1])
-        table.rows[1].cells[1].text = normative_text  # može biti "" (prazno)
+
+        cell_qty = table.rows[1].cells[1]
+        cell_qty.text = normative_text  # može biti "" (prazno)
+        for p in cell_qty.paragraphs:
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        cell_qty.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
 
         # kolona 2 (normative jm)
         top_cell_jm = table.rows[1].cells[2]
         for rr in range(2, n_items + 1):
             top_cell_jm = top_cell_jm.merge(table.rows[rr].cells[2])
-        table.rows[1].cells[2].text = normative_jm_text  # može biti "" (prazno)
+
+        cell_jm = table.rows[1].cells[2]
+        cell_jm.text = normative_jm_text  # može biti "" (prazno)
+        for p in cell_jm.paragraphs:
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        cell_jm.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
 
     buffer = BytesIO()
     doc.save(buffer)
     buffer.seek(0)
     return buffer
+
 
 
 import zipfile
