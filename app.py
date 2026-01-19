@@ -161,11 +161,8 @@ audit_map = R["audit_map"]
 sus_bad = R["sus_bad"]
 
 # ======================================================
-# ✅ NOVO: Pamćenje aktivnog taba (da ne skače na prvi)
+# ✅ "TABOVI" preko RADIO (ne skače na prvi tab)
 # ======================================================
-if "active_tab" not in st.session_state:
-    st.session_state["active_tab"] = 0
-
 tab_labels = [
     "📌 Uporedba",
     "⚠ Ekstremi kalibracije",
@@ -178,17 +175,24 @@ tab_labels = [
     "📄 Izvoz po računu"
 ]
 
-tab1, tab2, tab3, tab_map, tab_audit, tab4, tab5, tab6, tab7 = st.tabs(
+if "active_tab" not in st.session_state:
+    st.session_state["active_tab"] = tab_labels[0]
+
+active = st.radio(
+    "Navigacija",
     tab_labels,
-    default_index=int(st.session_state["active_tab"])
+    index=tab_labels.index(st.session_state["active_tab"]),
+    horizontal=True,
+    key="radio_tabs"
 )
+st.session_state["active_tab"] = active
+
+st.markdown("---")
 
 # ======================================================
-# TAB 1: Uporedba + FILTER + COUNTER BADGE
+# TAB: Uporedba
 # ======================================================
-with tab1:
-    st.session_state["active_tab"] = 0
-
+if active == "📌 Uporedba":
     st.subheader("Uporedba (ključne kolone + novi koef)")
 
     show = uporedba.copy()
@@ -263,20 +267,16 @@ with tab1:
     st.dataframe(filtered_df[cols], use_container_width=True)
 
 # ======================================================
-# TAB 2: Ekstremi
+# TAB: Ekstremi
 # ======================================================
-with tab2:
-    st.session_state["active_tab"] = 1
-
+elif active == "⚠ Ekstremi kalibracije":
     st.subheader("Ekstremi kalibracije (Koef_novi van očekivanog opsega)")
     st.dataframe(kal_ekstremi, use_container_width=True)
 
 # ======================================================
-# TAB 3: Fakture
+# TAB: Fakture
 # ======================================================
-with tab3:
-    st.session_state["active_tab"] = 2
-
+elif active == "📄 Fakture – obračun":
     st.subheader("Fakture – obračun količina za skidanje sa lagera")
 
     drop_cols = [
@@ -285,16 +285,13 @@ with tab3:
         "Koef_konverzije",
         "_koef_novi_mat",
     ]
-
     view_fakture = df_fakture_posle.drop(columns=drop_cols, errors="ignore")
     st.dataframe(view_fakture, use_container_width=True)
 
 # ======================================================
-# TAB MAP: Mapiranje
+# TAB: Mapiranje
 # ======================================================
-with tab_map:
-    st.session_state["active_tab"] = 3
-
+elif active == "🔎 Mapiranje IZLAZ↔LAGER":
     st.subheader("🔎 Provera mapiranja materijala i jedinica (IZLAZ ↔ LAGER)")
 
     if audit_map is None or audit_map.empty:
@@ -386,11 +383,9 @@ with tab_map:
                 st.info("Tip: mapiraj na tačan naziv kolone iz lager fajla.")
 
 # ======================================================
-# TAB AUDIT
+# TAB: Audit
 # ======================================================
-with tab_audit:
-    st.session_state["active_tab"] = 4
-
+elif active == "🧾 Audit (JM iste ≠ 1)":
     st.subheader("🧾 Audit: Jedinice su iste, a konverzija nije 1.0 (ne bi smelo)")
 
     if sus_bad is None or sus_bad.empty:
@@ -423,20 +418,16 @@ with tab_audit:
         st.dataframe(view[cols], use_container_width=True)
 
 # ======================================================
-# TAB 4: Pravila
+# TAB: Pravila (primenjena)
 # ======================================================
-with tab4:
-    st.session_state["active_tab"] = 5
-
+elif active == "🧮 Pravila (primenjena)":
     st.subheader("Pravila konverzije (primenjena u ovom obračunu)")
     st.dataframe(rules_used_df, use_container_width=True)
 
 # ======================================================
-# TAB 5: Grafikon
+# TAB: Grafikon
 # ======================================================
-with tab5:
-    st.session_state["active_tab"] = 6
-
+elif active == "📊 Grafikon":
     st.subheader("Poređenje stanja na lageru i ukupne potrošnje po materijalu")
     chart_df = uporedba.dropna(subset=["Materijal", "Stanje_na_lageru", "Ukupna_potrošnja"]).copy()
     if len(chart_df) > 0:
@@ -464,11 +455,9 @@ with tab5:
         st.info("Nema dovoljno podataka za grafikon.")
 
 # ======================================================
-# TAB 6: Injekt debug
+# TAB: Injekt debug
 # ======================================================
-with tab6:
-    st.session_state["active_tab"] = 7
-
+elif active == "🧪 Injekt debug":
     st.subheader("Injekt debug (paketi: 1.0–1.8x da se uklopi na 31.12)")
     if injekt_debug is None or injekt_debug.empty:
         st.info("Nema injekt računa ili nema magacin fajla.")
@@ -476,15 +465,13 @@ with tab6:
         st.dataframe(injekt_debug, use_container_width=True)
 
 # ======================================================
-# TAB 7: Izvoz po računu
+# TAB: Izvoz po računu
 # ======================================================
-with tab7:
-    st.session_state["active_tab"] = 8
-
+elif active == "📄 Izvoz po računu":
     st.subheader("📄 Izvoz dokumenata po računu")
 
     racuni = sorted(df_fakture_posle["Broj računa"].dropna().unique())
-    selected_racun = st.selectbox("Izaberi broj računa", racuni)
+    selected_racun = st.selectbox("Izaberi broj računa", racuni, key="select_racun")
 
     c1, c2 = st.columns(2)
 
@@ -494,7 +481,8 @@ with tab7:
             "📄 Preuzmi Word (ovaj račun)",
             data=word_buf,
             file_name=f"racun_{selected_racun}.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            key="btn_word_one"
         )
 
     with c2:
@@ -503,7 +491,8 @@ with tab7:
             "📊 Preuzmi Excel (ovaj račun)",
             data=xls_buf,
             file_name=f"racun_{selected_racun}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="btn_excel_one"
         )
 
     st.markdown("---")
@@ -517,7 +506,8 @@ with tab7:
             "📁 Word za SVE račune (ZIP)",
             data=zip_word,
             file_name="svi_racuni_word.zip",
-            mime="application/zip"
+            mime="application/zip",
+            key="btn_word_zip"
         )
 
     with c4:
@@ -526,11 +516,12 @@ with tab7:
             "📁 Excel za SVE račune (ZIP)",
             data=zip_excel,
             file_name="svi_racuni_excel.zip",
-            mime="application/zip"
+            mime="application/zip",
+            key="btn_excel_zip"
         )
 
 # ======================================================
-# Download
+# Download (Excel rezultat) – uvek na dnu
 # ======================================================
 st.subheader("📎 Preuzimanje Excel rezultata")
 buffer = export_to_excel(
@@ -544,5 +535,6 @@ st.download_button(
     label="💾 Preuzmi Excel rezultat",
     data=buffer,
     file_name="obracun_zaliha.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    key="btn_export_main_excel"
 )
