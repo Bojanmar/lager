@@ -897,6 +897,7 @@ def export_to_excel(uporedba, df_fakture_posle, injekt_debug=None, audit_map=Non
     return buffer
 
 
+
 from docx import Document
 from io import BytesIO
 import pandas as pd
@@ -905,41 +906,81 @@ def generate_word_for_racun(df_fakture_posle, broj_racuna):
     df = df_fakture_posle.copy()
     df = df[df["Broj računa"] == broj_racuna].copy()
 
-    # ✅ SAMO WORD: uzmi fakturisano iz "Normative" kolone (desna kolona sa slike)
     fakt_col = "Količina za fakturisanje (ono što piše u tabeli za račune - Normative)"
     fakt_jm_col = "Jedinica mere za fakturisanje – u računu"
 
-    df_out = pd.DataFrame({
-        "Materijal": df.get("Materijal"),
-        "Površina na koju je naneta – Fakturisana količina:": df.get(fakt_col),
-        "Jedinica": df.get(fakt_jm_col),
-        "Stvarna potrosnja": df.get("Kolicina za skidanje sa uracunatim Koef_novi za ovaj materijal"),
-        "Jedinica ": df.get("Jedinica mere za lager - skidanje količine"),
-    })
+    # --- uzmi SVE vrednosti koje postoje u "Normative" koloni za taj račun (bez fallback-a)
+    vals = pd.to_numeric(df.get(fakt_col), errors="coerce") if fakt_col in df.columns else pd.Series([], dtype=float)
+    vals = vals.dropna().tolist()
 
+    jms = df.get(fakt_jm_col) if fakt_jm_col in df.columns else pd.Series([pd.NA]*len(df))
+    jms = jms.dropna().astype(str).str.strip()
+    jms = [x for x in jms.tolist() if x != ""]
+
+    # string koji ide u merged ćeliju (prazno ako nema ničega)
+    normative_text = "\n".join([str(int(v)) if float(v).is_integer() else str(v) for v in vals]) if len(vals) else ""
+    # za jedinicu uzmi unique (ako ih ima više, prikaži sve)
+    jm_unique = []
+    for u in jms:
+        if u not in jm_unique:
+            jm_unique.append(u)
+    normative_jm_text = "\n".join(jm_unique) if len(jm_unique) else ""
+
+    # --- tabela po stavkama (materijal + stvarna potrošnja), a normative kolone su MERGED
     doc = Document()
     doc.add_heading(f"Obračun potrošnje – Račun {broj_racuna}", level=1)
 
-    table = doc.add_table(rows=1, cols=len(df_out.columns))
+    headers = [
+        "Materijal",
+        "Površina na koju je naneta – Fakturisana količina:",
+        "Jedinica",
+        "Stvarna potrosnja",
+        "Jedinica",
+    ]
+
+    n_items = len(df)
+    table = doc.add_table(rows=n_items + 1, cols=len(headers))
     table.style = "Table Grid"
 
-    # header
-    for i, col in enumerate(df_out.columns):
-        table.rows[0].cells[i].text = col
+    # header row
+    for i, h in enumerate(headers):
+        table.rows[0].cells[i].text = h
 
-    # data
-    for _, row in df_out.iterrows():
-        cells = table.add_row().cells
-        for i, col in enumerate(df_out.columns):
-            val = row[col]
-            if pd.isna(val):
-                cells[i].text = ""
-            else:
-                # format brojeva
-                if isinstance(val, (float, int)):
-                    cells[i].text = str(round(float(val), 6))
-                else:
-                    cells[i].text = str(val)
+    # data rows (po materijalu)
+    for r_idx, (_, row) in enumerate(df.iterrows(), start=1):
+        table.rows[r_idx].cells[0].text = "" if pd.isna(row.get("Materijal")) else str(row.get("Materijal"))
+
+        # normative kolone (1 i 2) popunjavamo tek posle (merged)
+        table.rows[r_idx].cells[1].text = ""
+        table.rows[r_idx].cells[2].text = ""
+
+        # stvarna potrosnja
+        v = row.get("Kolicina za skidanje sa uracunatim Koef_novi za ovaj materijal")
+        if pd.isna(v):
+            table.rows[r_idx].cells[3].text = ""
+        else:
+            try:
+                table.rows[r_idx].cells[3].text = str(round(float(v), 6))
+            except Exception:
+                table.rows[r_idx].cells[3].text = str(v)
+
+        # jm lager
+        jl = row.get("Jedinica mere za lager - skidanje količine")
+        table.rows[r_idx].cells[4].text = "" if pd.isna(jl) else str(jl)
+
+    # --- MERGE normative kolone preko svih stavki (ako ima bar 1 stavka)
+    if n_items >= 1:
+        # kolona 1 (normative qty)
+        top_cell_qty = table.rows[1].cells[1]
+        for rr in range(2, n_items + 1):
+            top_cell_qty = top_cell_qty.merge(table.rows[rr].cells[1])
+        table.rows[1].cells[1].text = normative_text  # može biti "" (prazno)
+
+        # kolona 2 (normative jm)
+        top_cell_jm = table.rows[1].cells[2]
+        for rr in range(2, n_items + 1):
+            top_cell_jm = top_cell_jm.merge(table.rows[rr].cells[2])
+        table.rows[1].cells[2].text = normative_jm_text  # može biti "" (prazno)
 
     buffer = BytesIO()
     doc.save(buffer)
@@ -947,6 +988,7 @@ def generate_word_for_racun(df_fakture_posle, broj_racuna):
     return buffer
 
 
+import zipfile
 
 def generate_word_zip_all_racuni(df_fakture_posle):
     buffer = BytesIO()
