@@ -4,6 +4,10 @@ import numpy as np
 import pandas as pd
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
+from docx.shared import Cm
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+
 
 # ======================================================
 # 0) Safe Excel read (Streamlit UploadedFile seek fix)
@@ -913,10 +917,73 @@ def export_to_excel(uporedba, df_fakture_posle, injekt_debug=None, audit_map=Non
     return buffer
 
 
-
 from docx import Document
 from io import BytesIO
 import pandas as pd
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
+from docx.shared import Cm
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+
+
+def _set_cell_center(cell, vertical=True):
+    for p in cell.paragraphs:
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.paragraph_format.space_before = 0
+        p.paragraph_format.space_after = 0
+        p.paragraph_format.line_spacing = 1.0
+    if vertical:
+        cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+
+
+def _set_cell_left(cell, vertical=True):
+    for p in cell.paragraphs:
+        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        p.paragraph_format.space_before = 0
+        p.paragraph_format.space_after = 0
+        p.paragraph_format.line_spacing = 1.0
+    if vertical:
+        cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+
+
+def _wrap_cell(cell):
+    # Word wrap flag
+    tcPr = cell._tc.get_or_add_tcPr()
+    wrap = OxmlElement("w:wordWrap")
+    wrap.set(qn("w:val"), "1")
+    tcPr.append(wrap)
+
+    # paragraf spacing (da nema ogromnih razmaka)
+    for p in cell.paragraphs:
+        p.paragraph_format.space_before = 0
+        p.paragraph_format.space_after = 0
+        p.paragraph_format.line_spacing = 1.0
+
+
+def _set_table_fixed_layout(table):
+    # isključi autofit
+    table.autofit = False
+
+    # fiksni layout u Word-u
+    tbl = table._tbl
+    tblPr = tbl.tblPr
+    if tblPr is None:
+        tblPr = OxmlElement("w:tblPr")
+        tbl.insert(0, tblPr)
+
+    tblLayout = OxmlElement("w:tblLayout")
+    tblLayout.set(qn("w:type"), "fixed")
+    tblPr.append(tblLayout)
+
+
+def _set_col_widths(table, widths_cm):
+    # widths_cm: lista širina po kolonama (u cm)
+    for row in table.rows:
+        for i, w in enumerate(widths_cm):
+            if i < len(row.cells):
+                row.cells[i].width = Cm(w)
+
 
 def generate_word_for_racun(df_fakture_posle, broj_racuna):
     df = df_fakture_posle.copy()
@@ -924,6 +991,10 @@ def generate_word_for_racun(df_fakture_posle, broj_racuna):
 
     fakt_col = "Količina za fakturisanje (ono što piše u tabeli za račune - Normative)"
     fakt_jm_col = "Jedinica mere za fakturisanje - u računu"
+
+    # ✅ nove kolone iz IZLAZ fajla
+    opis_col = "Opis Materijala"
+    tech_col = "Normativna potrošnja (tehnički list)"
 
     # --- uzmi SVE vrednosti koje postoje u "Normative" koloni za taj račun (bez fallback-a)
     vals = pd.to_numeric(df.get(fakt_col), errors="coerce") if fakt_col in df.columns else pd.Series([], dtype=float)
@@ -933,20 +1004,67 @@ def generate_word_for_racun(df_fakture_posle, broj_racuna):
     jms = jms.dropna().astype(str).str.strip()
     jms = [x for x in jms.tolist() if x != ""]
 
-    # string koji ide u merged ćeliju (prazno ako nema ničega)
     normative_text = "\n".join([str(int(v)) if float(v).is_integer() else str(v) for v in vals]) if len(vals) else ""
 
-    # za jedinicu uzmi unique (ako ih ima više, prikaži sve)
     jm_unique = []
     for u in jms:
         if u not in jm_unique:
             jm_unique.append(u)
     normative_jm_text = "\n".join(jm_unique) if len(jm_unique) else ""
 
-    # --- tabela po stavkama (materijal + stvarna potrošnja), a normative kolone su MERGED
+    # --- Word doc
     doc = Document()
     doc.add_heading(f"Obračun potrošnje – Račun {broj_racuna}", level=1)
 
+    # ======================================================
+    # ✅ TABELA 1: Materijal | Opis Materijala | Normativ (tehnički list)
+    # ======================================================
+    cols_for_meta = ["Materijal", opis_col, tech_col]
+    for c in cols_for_meta:
+        if c not in df.columns:
+            df[c] = pd.NA
+
+    meta_df = df[cols_for_meta].copy()
+    meta_df["__ord"] = range(len(meta_df))
+    meta_df = meta_df.sort_values("__ord").drop(columns="__ord")
+    meta_df = meta_df.drop_duplicates(subset=["Materijal"], keep="first")
+
+    t1_headers = ["Materijal", "Opis Materijala", "Normativna potrošnja (tehnički list)"]
+    t1 = doc.add_table(rows=len(meta_df) + 1, cols=3)
+    t1.style = "Table Grid"
+    t1.alignment = WD_TABLE_ALIGNMENT.CENTER
+
+    _set_table_fixed_layout(t1)
+    # ✅ širine (cm) - slobodno promeni ako želiš
+    _set_col_widths(t1, [5.0, 10.0, 5.5])
+
+    # header
+    for i, h in enumerate(t1_headers):
+        cell = t1.cell(0, i)
+        cell.text = h
+        _set_cell_center(cell)
+        _wrap_cell(cell)
+
+    # rows
+    for r, (_, row) in enumerate(meta_df.iterrows(), start=1):
+        mat = "" if pd.isna(row.get("Materijal")) else str(row.get("Materijal"))
+        opis = "" if pd.isna(row.get(opis_col)) else str(row.get(opis_col))
+        tech = "" if pd.isna(row.get(tech_col)) else str(row.get(tech_col))
+
+        c0 = t1.cell(r, 0); c0.text = mat
+        c1 = t1.cell(r, 1); c1.text = opis
+        c2 = t1.cell(r, 2); c2.text = tech
+
+        _set_cell_left(c0); _wrap_cell(c0)
+        _set_cell_left(c1); _wrap_cell(c1)
+        _set_cell_left(c2); _wrap_cell(c2)
+
+    # malo razmaka između tabela
+    doc.add_paragraph("")
+
+    # ======================================================
+    # TABELA 2: obračun tabela (sa merged Normative kolonama)
+    # ======================================================
     headers = [
         "Materijal",
         "Površina na koju je naneta – Fakturisana količina:",
@@ -958,56 +1076,65 @@ def generate_word_for_racun(df_fakture_posle, broj_racuna):
     n_items = len(df)
     table = doc.add_table(rows=n_items + 1, cols=len(headers))
     table.style = "Table Grid"
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+
+    _set_table_fixed_layout(table)
+    # ✅ širine (cm) - Materijal širi, normative uži, potrošnja srednje
+    _set_col_widths(table, [6.5, 4.0, 2.5, 4.0, 2.5])
 
     # header row
     for i, h in enumerate(headers):
-        table.rows[0].cells[i].text = h
+        cell = table.rows[0].cells[i]
+        cell.text = h
+        _set_cell_center(cell)
+        _wrap_cell(cell)
 
-    # data rows (po materijalu)
+    # data rows
     for r_idx, (_, row) in enumerate(df.iterrows(), start=1):
-        table.rows[r_idx].cells[0].text = "" if pd.isna(row.get("Materijal")) else str(row.get("Materijal"))
+        c_mat = table.rows[r_idx].cells[0]
+        c_mat.text = "" if pd.isna(row.get("Materijal")) else str(row.get("Materijal"))
+        _set_cell_left(c_mat)
+        _wrap_cell(c_mat)
 
-        # normative kolone (1 i 2) popunjavamo tek posle (merged)
+        # merged kolone (popunjavamo posle)
         table.rows[r_idx].cells[1].text = ""
         table.rows[r_idx].cells[2].text = ""
 
-        # stvarna potrosnja
+        # stvarna potrosnja (2 decimale)
         v = row.get("Kolicina za skidanje sa uracunatim Koef_novi za ovaj materijal")
+        c_pot = table.rows[r_idx].cells[3]
         if pd.isna(v):
-            table.rows[r_idx].cells[3].text = ""
+            c_pot.text = ""
         else:
             try:
-                table.rows[r_idx].cells[3].text = str(round(float(v), 2))
+                c_pot.text = str(round(float(v), 2))
             except Exception:
-                table.rows[r_idx].cells[3].text = str(v)
+                c_pot.text = str(v)
+        _set_cell_center(c_pot)
+        _wrap_cell(c_pot)
 
         # jm lager
         jl = row.get("Jedinica mere za lager - skidanje količine")
-        table.rows[r_idx].cells[4].text = "" if pd.isna(jl) else str(jl)
+        c_jm = table.rows[r_idx].cells[4]
+        c_jm.text = "" if pd.isna(jl) else str(jl)
+        _set_cell_center(c_jm)
+        _wrap_cell(c_jm)
 
-    # --- MERGE normative kolone preko svih stavki (ako ima bar 1 stavka)
+    # --- MERGE normative kolone
     if n_items >= 1:
-        # kolona 1 (normative qty)
         top_cell_qty = table.rows[1].cells[1]
         for rr in range(2, n_items + 1):
             top_cell_qty = top_cell_qty.merge(table.rows[rr].cells[1])
+        top_cell_qty.text = normative_text
+        _set_cell_center(top_cell_qty)
+        _wrap_cell(top_cell_qty)
 
-        cell_qty = table.rows[1].cells[1]
-        cell_qty.text = normative_text  # može biti "" (prazno)
-        for p in cell_qty.paragraphs:
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        cell_qty.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-
-        # kolona 2 (normative jm)
         top_cell_jm = table.rows[1].cells[2]
         for rr in range(2, n_items + 1):
             top_cell_jm = top_cell_jm.merge(table.rows[rr].cells[2])
-
-        cell_jm = table.rows[1].cells[2]
-        cell_jm.text = normative_jm_text  # može biti "" (prazno)
-        for p in cell_jm.paragraphs:
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        cell_jm.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        top_cell_jm.text = normative_jm_text
+        _set_cell_center(top_cell_jm)
+        _wrap_cell(top_cell_jm)
 
     buffer = BytesIO()
     doc.save(buffer)
