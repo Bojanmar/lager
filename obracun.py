@@ -665,6 +665,20 @@ def procesiraj_obracun(lager_file, fakture_file, magacin_file=None, edited_rules
     """
     df_fakture = read_excel_safe(fakture_file)
 
+        # ======================================================
+    # ✅ NOVO: obezbedi da "Normative" kolone postoje (za Word)
+    # (ne utiče na obračun – samo se prenose kao info)
+    # ======================================================
+    col_norm_qty = "Količina za fakturisanje (ono što piše u tabeli za račune - Normative)"
+    col_norm_jm  = "Jedinica mere za fakturisanje – u računu"
+
+    if col_norm_qty not in df_fakture.columns:
+        df_fakture[col_norm_qty] = pd.NA
+
+    if col_norm_jm not in df_fakture.columns:
+        df_fakture[col_norm_jm] = pd.NA
+
+
     # ✅ primeni ručno mapiranje (IZLAZ -> LAGER)
     if manual_map_df is not None and not manual_map_df.empty:
         mm = manual_map_df.copy()
