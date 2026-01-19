@@ -153,7 +153,7 @@ extend_rules("alchimica aqua smart dur 2k", [rule_factor_per("m2", "kg", 0.20)])
 extend_rules("hyperdesmo pb 2k a+b, 20+20lit", [rule_factor_per("m2", "kg", 3)])
 extend_rules("alchimica water foam 1k lv", [rule_per_piece("kg", 0.3)])
 extend_rules("waterfoam catalyst 1 kg", [rule_per_piece("kg", 0.015)])
-extend_rules("aquasmart - pb 1k 10kg, kg", [rule_factor_per("m2", "kg", 1.5), rule_factor_per_len("m", "kg", 0.7)])
+extend_rules("aquasmart - pb 1k 10kg, kg", [rule_factor_per("m2", "kg", 0.8), rule_factor_per_len("m", "kg", 0.7)])
 extend_rules("borner gebortol vs", [rule_factor_per("m2", "kg", 0.4)])
 extend_rules("cold cure polyurea 2k  a+b", [rule_factor_per("m2", "kg", 2.0)])
 extend_rules("dual seal 15mil lg 8,92m2 rolna", [
