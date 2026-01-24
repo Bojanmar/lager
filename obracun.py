@@ -1,3 +1,11 @@
+
+
+"""obracun.py – logika obračuna zaliha + export (Excel/Word).
+
+NAPOMENA (Jan 2026): U Word izveštaju po računu, donja tabela se više ne "spaja" (merge)
+po materijalu. Svaki materijal ostaje u svom redu, sa sopstvenom fakturisanom količinom
+i jedinicom. Takođe je dodata kolona "ID materijala" (iz IZLAZ fajla).
+"""
 import re
 import io
 import numpy as np
@@ -10,13 +18,9 @@ from docx.oxml.ns import qn
 import os
 from docx.shared import Pt, Cm
 from docx.dml.color import RGBColor
-from docx.oxml import OxmlElement
-
 
 
 DARK_BLUE = RGBColor(0, 51, 102)  # tamno plava
-CONTENT_WIDTH_CM = 17.18
-
 
 def _set_margins_a4_moderate(doc):
     section = doc.sections[0]
@@ -92,22 +96,6 @@ def _first_nonempty_value(series):
         return s.iloc[0] if len(s) else ""
     except Exception:
         return ""
-
-def _remove_table_borders(table):
-    tbl = table._tbl
-    tblPr = tbl.tblPr
-    tblBorders = tblPr.first_child_found_in("w:tblBorders")
-    if tblBorders is None:
-        tblBorders = OxmlElement("w:tblBorders")
-        tblPr.append(tblBorders)
-
-    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
-        tag = "w:{}".format(edge)
-        element = tblBorders.find(qn(tag))
-        if element is None:
-            element = OxmlElement(tag)
-            tblBorders.append(element)
-        element.set(qn("w:val"), "nil")
 
 
 # ======================================================
@@ -777,13 +765,24 @@ def procesiraj_obracun(lager_file, fakture_file, magacin_file=None, edited_rules
     # (ne utiče na obračun – samo se prenose kao info)
     # ======================================================
     col_norm_qty = "Količina za fakturisanje (ono što piše u tabeli za račune - Normative)"
-    col_norm_jm  = "Jedinica mere za fakturisanje – u računu"
+    col_norm_jm_dash = "Jedinica mere za fakturisanje – u računu"  # en-dash
+    col_norm_jm_hyph = "Jedinica mere za fakturisanje - u računu"  # običan minus
 
+    # količina (normativi)
     if col_norm_qty not in df_fakture.columns:
         df_fakture[col_norm_qty] = pd.NA
 
-    if col_norm_jm not in df_fakture.columns:
-        df_fakture[col_norm_jm] = pd.NA
+    # jedinica (normativi) – prihvati oba naziva kolone
+    has_dash = col_norm_jm_dash in df_fakture.columns
+    has_hyph = col_norm_jm_hyph in df_fakture.columns
+    if not has_dash and not has_hyph:
+        # napravi obe da Word uvek ima šta da čita
+        df_fakture[col_norm_jm_dash] = pd.NA
+        df_fakture[col_norm_jm_hyph] = pd.NA
+    elif has_dash and not has_hyph:
+        df_fakture[col_norm_jm_hyph] = df_fakture[col_norm_jm_dash]
+    elif has_hyph and not has_dash:
+        df_fakture[col_norm_jm_dash] = df_fakture[col_norm_jm_hyph]
 
 
     # ✅ primeni ručno mapiranje (IZLAZ -> LAGER)
@@ -1086,6 +1085,49 @@ def _set_col_widths(table, widths_cm):
                 row.cells[i].width = Cm(w)
 
 
+def _format_cell_value(x):
+    """Lep format vrednosti za upis u Word ćelije."""
+    import numpy as np
+    import pandas as pd
+
+    if x is None or pd.isna(x):
+        return ""
+
+    # ako je broj
+    try:
+        v = float(x)
+        if np.isfinite(v):
+            if abs(v - round(v)) < 1e-9:
+                return str(int(round(v)))
+            return str(round(v, 3)).rstrip("0").rstrip(".")
+    except Exception:
+        pass
+
+    # fallback string
+    return str(x).strip()
+
+def _format_cell_value(x):
+    """Siguran prikaz broja (za Word)."""
+    if x is None or pd.isna(x):
+        return ""
+    try:
+        v = float(x)
+        if v.is_integer():
+            return str(int(v))
+        return str(round(v, 2))
+    except Exception:
+        return str(x)
+
+def _format_id_int(x):
+    """ID u Word-u mora biti ceo broj (bez .0)."""
+    if x is None or pd.isna(x):
+        return ""
+    try:
+        return str(int(float(x)))
+    except Exception:
+        s = str(x).strip()
+        return s if s.isdigit() else ""
+
 
 def generate_word_for_racun(df_fakture_posle, broj_racuna):
     df = df_fakture_posle.copy()
@@ -1121,7 +1163,33 @@ def generate_word_for_racun(df_fakture_posle, broj_racuna):
     for u in jms:
         if u not in jm_unique:
             jm_unique.append(u)
-    normative_jm_text = "\n".join(jm_unique) if len(jm_unique) else ""
+    
+    # ======================================================
+    # Word prikaz za Tabelu 2:
+    # - svaka stavka dobija (Normative količinu + Normative jedinicu) 1:1
+    # - a zatim se (po potrebi) merge-uje po grupama (količina, jedinica),
+    #   tako da ispadne kao u Excelu čak i kad redovi nisu bili grupisani.
+    # ======================================================
+
+    tip_col = "Pozicija za fakturisanje - tip hidroizolacije"
+    fakt_col = "Količina za fakturisanje (ono što piše u tabeli za račune - Normative)"
+    fakt_jm_col = "Jedinica mere za fakturisanje - u računu"
+
+    df2 = df.copy()
+    for c in [tip_col, fakt_col, fakt_jm_col]:
+        if c not in df2.columns:
+            df2[c] = pd.NA
+
+    df2["__fakt_num__"] = pd.to_numeric(df2[fakt_col], errors="coerce")
+    df2[tip_col] = df2[tip_col].astype("string")
+    df2[fakt_jm_col] = df2[fakt_jm_col].astype("string")
+
+    # Stabilan sort: grupiše po tipu radova pa po (količina, jedinica)
+    df2 = df2.sort_values(
+        by=[tip_col, "__fakt_num__", fakt_jm_col],
+        kind="mergesort",
+        na_position="last"
+    ).drop(columns=["__fakt_num__"])
 
     # ======================================================
     # Word doc + HEADER slika + globalni stilovi
@@ -1149,44 +1217,17 @@ def generate_word_for_racun(df_fakture_posle, broj_racuna):
 
     doc.add_paragraph("")
 
-# ------------------------------------------------------
-# INFO TABELA (PO RAČUNU / KLIJENT) – bez ivica
-# ------------------------------------------------------
-    info_table = doc.add_table(rows=2, cols=2)
-    info_table.alignment = WD_TABLE_ALIGNMENT.LEFT
-    info_table.autofit = False
+    # PO RAČUNU BROJ (bold)
+    p1 = doc.add_paragraph()
+    r1 = p1.add_run(f"PO RAČUNU BROJ: {broj_racuna}")
+    _style_run(r1, bold=True)
 
-    _set_table_fixed_layout(info_table)
-    _set_col_widths(info_table, [4.5, 12.68])  # ukupno 17.18 cm
-
-    # red 1
-    c00 = info_table.cell(0, 0)
-    c01 = info_table.cell(0, 1)
-    c00.text = "PO RAČUNU BROJ:"
-    c01.text = str(broj_racuna)
-    _set_cell_left(c00); _wrap_cell(c00)
-    _set_cell_left(c01); _wrap_cell(c01)
-    for r in c00.paragraphs[0].runs:
-        _style_run(r, bold=True)
-    for r in c01.paragraphs[0].runs:
-        _style_run(r, bold=True)
-
-    # red 2
-    c10 = info_table.cell(1, 0)
-    c11 = info_table.cell(1, 1)
-    c10.text = "KLIJENT:"
-    c11.text = client_name
-    _set_cell_left(c10); _wrap_cell(c10)
-    _set_cell_left(c11); _wrap_cell(c11)
-    for r in c10.paragraphs[0].runs:
-        _style_run(r, bold=True)
-    for r in c11.paragraphs[0].runs:
-        _style_run(r, bold=True)
-
-    _remove_table_borders(info_table)
-
-    doc.add_paragraph("")
-
+    # KLIJENT (bold)
+    p2 = doc.add_paragraph()
+    r2a = p2.add_run("KLIJENT:\t\t     ")
+    _style_run(r2a, bold=True)
+    r2b = p2.add_run(f"{client_name}")
+    _style_run(r2b, bold=True)
 
     doc.add_paragraph("")
 
@@ -1213,8 +1254,7 @@ def generate_word_for_racun(df_fakture_posle, broj_racuna):
     t1.alignment = WD_TABLE_ALIGNMENT.CENTER
 
     _set_table_fixed_layout(t1)
-    _set_col_widths(t1, [5, 8.2, 4.48])  # ✅ ukupno 17.18
-
+    _set_col_widths(t1, [4.0, 8.0, 5.5])
 
     for i, h in enumerate(t1_headers):
         cell = t1.cell(0, i)
@@ -1247,7 +1287,10 @@ def generate_word_for_racun(df_fakture_posle, broj_racuna):
     # ======================================================
     # TABELA 2 (stvarne potrošnje)
     # ======================================================
+    # ✅ Donja tabela: SVAKI materijal ima svoj red (bez merge).
+    # Uključujemo i "ID materijala" iz IZLAZ fajla.
     headers = [
+        "ID materijala",
         "Materijal",
         "Površina na koju je naneta – Fakturisana količina:",
         "Jedinica",
@@ -1255,14 +1298,38 @@ def generate_word_for_racun(df_fakture_posle, broj_racuna):
         "Jedinica",
     ]
 
-    n_items = len(df)
+    # kolone potrebne za donju tabelu
+    id_col = "ID materijala"
+    if id_col not in df.columns:
+        df[id_col] = pd.NA
+    if fakt_col not in df.columns:
+        df[fakt_col] = pd.NA
+    if fakt_jm_col not in df.columns:
+        # podrži i varijantu sa EN DASH (–)
+        alt = "Jedinica mere za fakturisanje – u računu"
+        if alt in df.columns:
+            df[fakt_jm_col] = df[alt]
+        else:
+            df[fakt_jm_col] = pd.NA
+
+    df2 = df[[
+        id_col,
+        "Materijal",
+        fakt_col,
+        fakt_jm_col,
+        "Kolicina za skidanje sa uracunatim Koef_novi za ovaj materijal",
+        "Jedinica mere za lager - skidanje količine",
+    ]].copy()
+    
+
+    n_items = len(df2)
     table = doc.add_table(rows=n_items + 1, cols=len(headers))
     table.style = "Table Grid"
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
     _set_table_fixed_layout(table)
-    _set_col_widths(table, [5.5, 3.7, 2.0, 4.0, 2.48])  # ✅ ukupno 17.18
-
+    # ukupno 17.18 cm (CONTENT_WIDTH_CM)
+    _set_col_widths(table, [2.30, 4.70, 3.40, 1.80, 3.30, 1.68])
 
     for i, h in enumerate(headers):
         cell = table.rows[0].cells[i]
@@ -1270,17 +1337,45 @@ def generate_word_for_racun(df_fakture_posle, broj_racuna):
         _set_cell_center(cell)
         _wrap_cell(cell)
 
-    for r_idx, (_, row) in enumerate(df.iterrows(), start=1):
-        c_mat = table.rows[r_idx].cells[0]
+    for r_idx, (_, row) in enumerate(df2.iterrows(), start=1):
+        # ID materijala
+        c_id = table.rows[r_idx].cells[0]
+        mid = row.get("ID materijala")
+        c_id.text = _format_id_int(mid)
+
+        _set_cell_center(c_id)
+        _wrap_cell(c_id)
+
+        # Materijal
+        c_mat = table.rows[r_idx].cells[1]
         c_mat.text = "" if pd.isna(row.get("Materijal")) else str(row.get("Materijal"))
         _set_cell_left(c_mat)
         _wrap_cell(c_mat)
 
-        table.rows[r_idx].cells[1].text = ""
-        table.rows[r_idx].cells[2].text = ""
+        
+        # ✅ Normative količina (po redu)
+        fq = row.get(fakt_col)
+        c_fq = table.rows[r_idx].cells[2]
+        if pd.isna(fq):
+            c_fq.text = ""
+        else:
+            try:
+                fv = float(fq)
+                c_fq.text = str(int(fv) if fv.is_integer() else round(fv, 2))
+            except Exception:
+                c_fq.text = str(fq)
+        _set_cell_center(c_fq)
+        _wrap_cell(c_fq)
+
+        # ✅ Normative jedinica (po redu)
+        fu = row.get(fakt_jm_col)
+        c_fu = table.rows[r_idx].cells[3]
+        c_fu.text = "" if pd.isna(fu) else str(fu)
+        _set_cell_center(c_fu)
+        _wrap_cell(c_fu)
 
         v = row.get("Kolicina za skidanje sa uracunatim Koef_novi za ovaj materijal")
-        c_pot = table.rows[r_idx].cells[3]
+        c_pot = table.rows[r_idx].cells[4]
         if pd.isna(v):
             c_pot.text = ""
         else:
@@ -1292,27 +1387,12 @@ def generate_word_for_racun(df_fakture_posle, broj_racuna):
         _wrap_cell(c_pot)
 
         jl = row.get("Jedinica mere za lager - skidanje količine")
-        c_jm = table.rows[r_idx].cells[4]
+        c_jm = table.rows[r_idx].cells[5]
         c_jm.text = "" if pd.isna(jl) else str(jl)
         _set_cell_center(c_jm)
         _wrap_cell(c_jm)
 
-    # merge normative kolone (količina + jedinica)
-    if n_items >= 1:
-        top_cell_qty = table.rows[1].cells[1]
-        for rr in range(2, n_items + 1):
-            top_cell_qty = top_cell_qty.merge(table.rows[rr].cells[1])
-        top_cell_qty.text = normative_text
-        _set_cell_center(top_cell_qty)
-        _wrap_cell(top_cell_qty)
-
-        top_cell_jm = table.rows[1].cells[2]
-        for rr in range(2, n_items + 1):
-            top_cell_jm = top_cell_jm.merge(table.rows[rr].cells[2])
-        top_cell_jm.text = normative_jm_text
-        _set_cell_center(top_cell_jm)
-        _wrap_cell(top_cell_jm)
-
+    # (bez merge) – svaka stavka ostaje u svom redu
     # forsiraj Arial i u tabelama
     _force_tables_font_ariel(doc, "Arial")
 
