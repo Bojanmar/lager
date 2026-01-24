@@ -7,6 +7,107 @@ from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 from docx.shared import Cm
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+import os
+from docx.shared import Pt, Cm
+from docx.dml.color import RGBColor
+from docx.oxml import OxmlElement
+
+
+
+DARK_BLUE = RGBColor(0, 51, 102)  # tamno plava
+CONTENT_WIDTH_CM = 17.18
+
+
+def _set_margins_a4_moderate(doc):
+    section = doc.sections[0]
+    section.top_margin = Cm(2.54)
+    section.bottom_margin = Cm(2.54)
+    section.left_margin = Cm(1.91)
+    section.right_margin = Cm(1.91)
+
+def _set_default_font_ariel(doc):
+    style = doc.styles["Normal"]
+    style.font.name = "Arial"
+    style.font.size = Pt(11)
+
+    # bitno za Word da stvarno primeni font svuda
+    rFonts = style.element.rPr.rFonts
+    rFonts.set(qn("w:ascii"), "Arial")
+    rFonts.set(qn("w:hAnsi"), "Arial")
+    rFonts.set(qn("w:cs"), "Arial")
+    rFonts.set(qn("w:eastAsia"), "Arial")
+
+def _style_run(run, size_pt=None, bold=None, color=None, font_name="Arial"):
+    run.font.name = font_name
+    run._element.rPr.rFonts.set(qn("w:ascii"), font_name)
+    run._element.rPr.rFonts.set(qn("w:hAnsi"), font_name)
+    run._element.rPr.rFonts.set(qn("w:cs"), font_name)
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), font_name)
+
+    if size_pt is not None:
+        run.font.size = Pt(size_pt)
+    if bold is not None:
+        run.bold = bold
+    if color is not None:
+        run.font.color.rgb = color
+
+def _force_tables_font_ariel(doc, font_name="Arial"):
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    for r in p.runs:
+                        _style_run(r, font_name=font_name)
+
+def _add_header_image(doc, image_path):
+    """
+    Ubacuje sliku u HEADER (fiksno na svakoj strani).
+    Očekuje 'header.png' u istom folderu kao obracun.py (ili prosleđen put).
+    """
+    if not image_path or not os.path.exists(image_path):
+        return
+
+    section = doc.sections[0]
+    header = section.header
+
+    # očisti header sadržaj
+    for p in header.paragraphs:
+        try:
+            p.clear()
+        except Exception:
+            # ako clear ne postoji u tvojoj verziji python-docx, ručno brišemo run-ove
+            for rr in p.runs:
+                rr.text = ""
+
+    p = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = p.add_run()
+    # širina po A4, uz moderate margine
+    run.add_picture(image_path, width=Cm(17.0))
+
+def _first_nonempty_value(series):
+    try:
+        s = series.dropna().astype(str).str.strip()
+        s = s[s != ""]
+        return s.iloc[0] if len(s) else ""
+    except Exception:
+        return ""
+
+def _remove_table_borders(table):
+    tbl = table._tbl
+    tblPr = tbl.tblPr
+    tblBorders = tblPr.first_child_found_in("w:tblBorders")
+    if tblBorders is None:
+        tblBorders = OxmlElement("w:tblBorders")
+        tblPr.append(tblBorders)
+
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        tag = "w:{}".format(edge)
+        element = tblBorders.find(qn(tag))
+        if element is None:
+            element = OxmlElement(tag)
+            tblBorders.append(element)
+        element.set(qn("w:val"), "nil")
 
 
 # ======================================================
@@ -985,18 +1086,28 @@ def _set_col_widths(table, widths_cm):
                 row.cells[i].width = Cm(w)
 
 
+
 def generate_word_for_racun(df_fakture_posle, broj_racuna):
     df = df_fakture_posle.copy()
     df = df[df["Broj računa"] == broj_racuna].copy()
 
+    # -----------------------------
+    # KLIJENT (iz kolone Kompanija)
+    # -----------------------------
+    client_name = ""
+    if "Kompanija" in df.columns:
+        client_name = _first_nonempty_value(df["Kompanija"])
+
+    # -----------------------------
+    # kolone (kao ranije)
+    # -----------------------------
     fakt_col = "Količina za fakturisanje (ono što piše u tabeli za račune - Normative)"
     fakt_jm_col = "Jedinica mere za fakturisanje - u računu"
 
-    # ✅ nove kolone iz IZLAZ fajla
     opis_col = "Opis Materijala"
     tech_col = "Normativna potrošnja (tehnički list)"
 
-    # --- uzmi SVE vrednosti koje postoje u "Normative" koloni za taj račun (bez fallback-a)
+    # --- vrednosti iz "Normative" kolone za taj račun (spojeno u jednu ćeliju)
     vals = pd.to_numeric(df.get(fakt_col), errors="coerce") if fakt_col in df.columns else pd.Series([], dtype=float)
     vals = vals.dropna().tolist()
 
@@ -1012,12 +1123,79 @@ def generate_word_for_racun(df_fakture_posle, broj_racuna):
             jm_unique.append(u)
     normative_jm_text = "\n".join(jm_unique) if len(jm_unique) else ""
 
-    # --- Word doc
+    # ======================================================
+    # Word doc + HEADER slika + globalni stilovi
+    # ======================================================
     doc = Document()
-    doc.add_heading(f"Obračun potrošnje – Račun {broj_racuna}", level=1)
+
+    # margine + Arial
+    _set_margins_a4_moderate(doc)
+    _set_default_font_ariel(doc)
+
+    # header.png u istom folderu
+    header_img_path = os.path.join(os.path.dirname(__file__), "header.png")
+    _add_header_image(doc, header_img_path)
+
+    # ------------------------------------------------------
+    # FIKSNI TEKST + stilovi (zahtevi)
+    # ------------------------------------------------------
+    doc.add_paragraph("")  # razmak ispod headera
+
+    # NASLOV (bold, centriran, Arial 16, tamno plav)
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run("NORMATIV POTROŠNJE MATERIJALA ZA IZVOĐENJE HIDROIZOLACIJE")
+    _style_run(r, size_pt=16, bold=True, color=DARK_BLUE)
+
+    doc.add_paragraph("")
+
+# ------------------------------------------------------
+# INFO TABELA (PO RAČUNU / KLIJENT) – bez ivica
+# ------------------------------------------------------
+    info_table = doc.add_table(rows=2, cols=2)
+    info_table.alignment = WD_TABLE_ALIGNMENT.LEFT
+    info_table.autofit = False
+
+    _set_table_fixed_layout(info_table)
+    _set_col_widths(info_table, [4.5, 12.68])  # ukupno 17.18 cm
+
+    # red 1
+    c00 = info_table.cell(0, 0)
+    c01 = info_table.cell(0, 1)
+    c00.text = "PO RAČUNU BROJ:"
+    c01.text = str(broj_racuna)
+    _set_cell_left(c00); _wrap_cell(c00)
+    _set_cell_left(c01); _wrap_cell(c01)
+    for r in c00.paragraphs[0].runs:
+        _style_run(r, bold=True)
+    for r in c01.paragraphs[0].runs:
+        _style_run(r, bold=True)
+
+    # red 2
+    c10 = info_table.cell(1, 0)
+    c11 = info_table.cell(1, 1)
+    c10.text = "KLIJENT:"
+    c11.text = client_name
+    _set_cell_left(c10); _wrap_cell(c10)
+    _set_cell_left(c11); _wrap_cell(c11)
+    for r in c10.paragraphs[0].runs:
+        _style_run(r, bold=True)
+    for r in c11.paragraphs[0].runs:
+        _style_run(r, bold=True)
+
+    _remove_table_borders(info_table)
+
+    doc.add_paragraph("")
+
+
+    doc.add_paragraph("")
+
+    doc.add_paragraph(
+        "Prema normativima proizvođača materijala za hidroizolaciju po sistemu predviđena je okvirna sledeća potrošnja materijala:"
+    )
 
     # ======================================================
-    # ✅ TABELA 1: Materijal | Opis Materijala | Normativ (tehnički list)
+    # TABELA 1 (normativi / opis / tehnički list)
     # ======================================================
     cols_for_meta = ["Materijal", opis_col, tech_col]
     for c in cols_for_meta:
@@ -1035,35 +1213,39 @@ def generate_word_for_racun(df_fakture_posle, broj_racuna):
     t1.alignment = WD_TABLE_ALIGNMENT.CENTER
 
     _set_table_fixed_layout(t1)
-    # ✅ širine (cm) - slobodno promeni ako želiš
-    _set_col_widths(t1, [5.0, 10.0, 5.5])
+    _set_col_widths(t1, [5, 8.2, 4.48])  # ✅ ukupno 17.18
 
-    # header
+
     for i, h in enumerate(t1_headers):
         cell = t1.cell(0, i)
         cell.text = h
         _set_cell_center(cell)
         _wrap_cell(cell)
 
-    # rows
-    for r, (_, row) in enumerate(meta_df.iterrows(), start=1):
+    for r_idx, (_, row) in enumerate(meta_df.iterrows(), start=1):
         mat = "" if pd.isna(row.get("Materijal")) else str(row.get("Materijal"))
         opis = "" if pd.isna(row.get(opis_col)) else str(row.get(opis_col))
         tech = "" if pd.isna(row.get(tech_col)) else str(row.get(tech_col))
 
-        c0 = t1.cell(r, 0); c0.text = mat
-        c1 = t1.cell(r, 1); c1.text = opis
-        c2 = t1.cell(r, 2); c2.text = tech
+        c0 = t1.cell(r_idx, 0); c0.text = mat
+        c1 = t1.cell(r_idx, 1); c1.text = opis
+        c2 = t1.cell(r_idx, 2); c2.text = tech
 
         _set_cell_left(c0); _wrap_cell(c0)
         _set_cell_left(c1); _wrap_cell(c1)
         _set_cell_left(c2); _wrap_cell(c2)
 
-    # malo razmaka između tabela
+    doc.add_paragraph("")
+    doc.add_paragraph("NAPOMENA: Sve pomenute potrošnje su minimalne i mogu biti različite u zavisnosti od površine.")
     doc.add_paragraph("")
 
+    # DRUGI NASLOV (bold, Arial 16, tamno plav)
+    p3 = doc.add_paragraph()
+    r3 = p3.add_run("Stvarne potrosnje hidroizolacionog materijala za predmetni racun")
+    _style_run(r3, size_pt=16, bold=True, color=DARK_BLUE)
+
     # ======================================================
-    # TABELA 2: obračun tabela (sa merged Normative kolonama)
+    # TABELA 2 (stvarne potrošnje)
     # ======================================================
     headers = [
         "Materijal",
@@ -1079,28 +1261,24 @@ def generate_word_for_racun(df_fakture_posle, broj_racuna):
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
     _set_table_fixed_layout(table)
-    # ✅ širine (cm) - Materijal širi, normative uži, potrošnja srednje
-    _set_col_widths(table, [6.5, 4.0, 2.5, 4.0, 2.5])
+    _set_col_widths(table, [5.5, 3.7, 2.0, 4.0, 2.48])  # ✅ ukupno 17.18
 
-    # header row
+
     for i, h in enumerate(headers):
         cell = table.rows[0].cells[i]
         cell.text = h
         _set_cell_center(cell)
         _wrap_cell(cell)
 
-    # data rows
     for r_idx, (_, row) in enumerate(df.iterrows(), start=1):
         c_mat = table.rows[r_idx].cells[0]
         c_mat.text = "" if pd.isna(row.get("Materijal")) else str(row.get("Materijal"))
         _set_cell_left(c_mat)
         _wrap_cell(c_mat)
 
-        # merged kolone (popunjavamo posle)
         table.rows[r_idx].cells[1].text = ""
         table.rows[r_idx].cells[2].text = ""
 
-        # stvarna potrosnja (2 decimale)
         v = row.get("Kolicina za skidanje sa uracunatim Koef_novi za ovaj materijal")
         c_pot = table.rows[r_idx].cells[3]
         if pd.isna(v):
@@ -1113,14 +1291,13 @@ def generate_word_for_racun(df_fakture_posle, broj_racuna):
         _set_cell_center(c_pot)
         _wrap_cell(c_pot)
 
-        # jm lager
         jl = row.get("Jedinica mere za lager - skidanje količine")
         c_jm = table.rows[r_idx].cells[4]
         c_jm.text = "" if pd.isna(jl) else str(jl)
         _set_cell_center(c_jm)
         _wrap_cell(c_jm)
 
-    # --- MERGE normative kolone
+    # merge normative kolone (količina + jedinica)
     if n_items >= 1:
         top_cell_qty = table.rows[1].cells[1]
         for rr in range(2, n_items + 1):
@@ -1136,13 +1313,13 @@ def generate_word_for_racun(df_fakture_posle, broj_racuna):
         _set_cell_center(top_cell_jm)
         _wrap_cell(top_cell_jm)
 
+    # forsiraj Arial i u tabelama
+    _force_tables_font_ariel(doc, "Arial")
+
     buffer = BytesIO()
     doc.save(buffer)
     buffer.seek(0)
     return buffer
-
-
-
 import zipfile
 
 def generate_word_zip_all_racuni(df_fakture_posle):
