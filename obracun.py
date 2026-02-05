@@ -137,6 +137,22 @@ def norm_unit(u):
     }
     return repl.get(u, u)
 
+def _round_qty_by_unit(qty_series, unit_series):
+    qty = pd.to_numeric(qty_series, errors="coerce")
+    unit_norm = unit_series.map(norm_unit)
+    return np.where(unit_norm.eq("kom"), qty.round(0), qty.round(1))
+
+def _format_qty_for_output(val, unit):
+    if pd.isna(val):
+        return ""
+    try:
+        v = float(val)
+    except Exception:
+        return str(val)
+    if norm_unit(unit) == "kom":
+        return str(int(round(v)))
+    return f"{round(v, 1):.1f}"
+
 # ======================================================
 # 2) Markup za iste jedinice
 # ======================================================
@@ -284,6 +300,7 @@ extend_rules("vandex plug, 15kg kanta", [])
 extend_rules("vandex uni moratar 1z 25kg", [rule_factor_per_len("m", "kg", 5.0), rule_per_piece("kg", 0.5)])
 extend_rules("yapseal 106, komp a, 20kg", [rule_factor_per("m2", "kg", 3.5)])
 extend_rules("yapseal 106, komp b, 10kg", [rule_factor_per("m2", "kg", 1.75)])
+extend_rules("yapseal 106, komp a + b, 20+10kg", [rule_factor_per("m2", "kg", 3.0)])
 
 # ======================================================
 # 5) Konstante + dodatna pravila
@@ -957,6 +974,64 @@ def procesiraj_obracun(lager_file, fakture_file, magacin_file=None, edited_rules
     uporedba["Koef_novi"] = uporedba.apply(_koef_novi, axis=1)
     uporedba["Finalna_potrošnja"] = uporedba["Ukupna_potrošnja"] * uporedba["Koef_novi"]
 
+    # ======================================================
+    # NOVO: Koef_novi koji NE dira "Prodaja racuna" (po materijalu)
+    # ======================================================
+    tip_cols = [
+        "Pozicija za fakturisanje - tip hidroizolacije",
+        "Tip računa",
+        "Tip racuna",
+    ]
+    fixed_labels = {"prodaja racuna", "prodaja materijala"}
+    mask_fixed = pd.Series(False, index=df_posle.index)
+    for c in tip_cols:
+        if c in df_posle.columns:
+            mask_fixed = mask_fixed | df_posle[c].fillna("").map(norm_text).isin(fixed_labels)
+
+    df_posle["_mat_key"] = df_posle["Materijal"].map(norm_text)  # stabilan ključ za join
+    qs2 = pd.to_numeric(df_posle["Količina za skidanje sa lagera"], errors="coerce")
+
+    fixed_sum = (
+        df_posle.loc[mask_fixed]
+        .assign(_qs2=qs2[mask_fixed])
+        .groupby("_mat_key")["_qs2"]
+        .sum(min_count=1)
+        .rename("Fixed_sum")
+    )
+    total_sum = (
+        df_posle.assign(_qs2=qs2)
+        .groupby("_mat_key")["_qs2"]
+        .sum(min_count=1)
+        .rename("Total_sum")
+    )
+    fixed_sum = fixed_sum.reindex(total_sum.index).fillna(0.0)
+    adj_sum = (total_sum - fixed_sum).rename("Adj_sum")
+
+    uporedba = uporedba.merge(
+        fixed_sum.reset_index().rename(columns={"_mat_key": "Materijal_key"}),
+        on="Materijal_key",
+        how="left"
+    )
+    uporedba = uporedba.merge(
+        adj_sum.reset_index().rename(columns={"_mat_key": "Materijal_key"}),
+        on="Materijal_key",
+        how="left"
+    )
+    uporedba["Fixed_sum"] = uporedba["Fixed_sum"].fillna(0.0)
+
+    def _koef_novi_adjusted(row):
+        target = row.get("Realna_potrosnja_po_magacinu")
+        adj = row.get("Adj_sum")
+        fixed = row.get("Fixed_sum")
+        if pd.isna(target) or pd.isna(adj) or adj <= 0:
+            return np.nan
+        target_adj = target - (fixed if pd.notna(fixed) else 0.0)
+        if target_adj <= 0:
+            return 0.0
+        return target_adj / adj
+
+    uporedba["Koef_novi"] = uporedba.apply(_koef_novi_adjusted, axis=1)
+    uporedba["Finalna_potrošnja"] = uporedba["Ukupna_potrošnja"] * uporedba["Koef_novi"]
     CAL_MIN, CAL_MAX = 0.3, 3.0
     uporedba["Kalibracija_status"] = np.where(
         uporedba["Koef_novi"].between(CAL_MIN, CAL_MAX, inclusive="both"),
@@ -965,23 +1040,51 @@ def procesiraj_obracun(lager_file, fakture_file, magacin_file=None, edited_rules
     )
     kalibracija_ekstremi = uporedba[uporedba["Kalibracija_status"].eq("EKSTREMNO")].copy()
 
-    # ======================================================
-    # ✅ NOVO: Količina za skidanje sa uracunatim Koef_novi (po materijalu)
-    # ======================================================
     koef_map = uporedba.set_index("Materijal_key")["Koef_novi"].to_dict()
-    df_posle["_mat_key"] = df_posle["Materijal"].map(norm_text)  # stabilan ključ za join
     df_posle["_koef_novi_mat"] = df_posle["_mat_key"].map(koef_map)
 
-    qs2 = pd.to_numeric(df_posle["Količina za skidanje sa lagera"], errors="coerce")
     k2 = pd.to_numeric(df_posle["_koef_novi_mat"], errors="coerce")
-
     df_posle["Kolicina za skidanje sa uracunatim Koef_novi za ovaj materijal"] = np.where(
-        k2.notna(),
-        qs2 * k2,
-        qs2  # ako nema Koef_novi, prepiši originalno skidanje
+        mask_fixed,
+        qs2,
+        np.where(k2.notna(), qs2 * k2, qs2)  # ako nema Koef_novi, prepiši originalno skidanje
     )
 
-    
+    # ======================================================
+    # Zaokruživanje: 1 decimal svuda, osim "kom" -> ceo broj
+    # ======================================================
+    if "Jedinica mere za lager - skidanje količine" in df_posle.columns:
+        if "Količina za skidanje sa lagera" in df_posle.columns:
+            df_posle["Količina za skidanje sa lagera"] = _round_qty_by_unit(
+                df_posle["Količina za skidanje sa lagera"],
+                df_posle["Jedinica mere za lager - skidanje količine"]
+            )
+        if "Kolicina za skidanje sa uracunatim Koef_novi za ovaj materijal" in df_posle.columns:
+            df_posle["Kolicina za skidanje sa uracunatim Koef_novi za ovaj materijal"] = _round_qty_by_unit(
+                df_posle["Kolicina za skidanje sa uracunatim Koef_novi za ovaj materijal"],
+                df_posle["Jedinica mere za lager - skidanje količine"]
+            )
+
+    if "Jedinica mere za fakturisanje" in df_posle.columns and "Količina za fakturisanje" in df_posle.columns:
+        df_posle["Količina za fakturisanje"] = _round_qty_by_unit(
+            df_posle["Količina za fakturisanje"],
+            df_posle["Jedinica mere za fakturisanje"]
+        )
+
+    # Normative kolone (Word)
+    col_norm_qty = "Količina za fakturisanje (ono što piše u tabeli za račune - Normative)"
+    col_norm_jm_dash = "Jedinica mere za fakturisanje – u računu"
+    col_norm_jm_hyph = "Jedinica mere za fakturisanje - u računu"
+    if col_norm_qty in df_posle.columns:
+        if col_norm_jm_dash in df_posle.columns:
+            df_posle[col_norm_qty] = _round_qty_by_unit(df_posle[col_norm_qty], df_posle[col_norm_jm_dash])
+        elif col_norm_jm_hyph in df_posle.columns:
+            df_posle[col_norm_qty] = _round_qty_by_unit(df_posle[col_norm_qty], df_posle[col_norm_jm_hyph])
+
+    # Uporedba: sve numeričke na 1 decimalu
+    num_cols = uporedba.select_dtypes(include=[np.number]).columns
+    if len(num_cols) > 0:
+        uporedba[num_cols] = uporedba[num_cols].round(1)
 
     rules_used_df = rules_to_df(rules_dict)
 
@@ -1355,15 +1458,9 @@ def generate_word_for_racun(df_fakture_posle, broj_racuna):
         
         # ✅ Normative količina (po redu)
         fq = row.get(fakt_col)
+        fu = row.get(fakt_jm_col)
         c_fq = table.rows[r_idx].cells[2]
-        if pd.isna(fq):
-            c_fq.text = ""
-        else:
-            try:
-                fv = float(fq)
-                c_fq.text = str(int(fv) if fv.is_integer() else round(fv, 2))
-            except Exception:
-                c_fq.text = str(fq)
+        c_fq.text = _format_qty_for_output(fq, fu)
         _set_cell_center(c_fq)
         _wrap_cell(c_fq)
 
@@ -1376,13 +1473,7 @@ def generate_word_for_racun(df_fakture_posle, broj_racuna):
 
         v = row.get("Kolicina za skidanje sa uracunatim Koef_novi za ovaj materijal")
         c_pot = table.rows[r_idx].cells[4]
-        if pd.isna(v):
-            c_pot.text = ""
-        else:
-            try:
-                c_pot.text = str(round(float(v), 2))
-            except Exception:
-                c_pot.text = str(v)
+        c_pot.text = _format_qty_for_output(v, jl)
         _set_cell_center(c_pot)
         _wrap_cell(c_pot)
 
