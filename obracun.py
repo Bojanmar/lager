@@ -1472,12 +1472,12 @@ def generate_word_for_racun(df_fakture_posle, broj_racuna):
         _wrap_cell(c_fu)
 
         v = row.get("Kolicina za skidanje sa uracunatim Koef_novi za ovaj materijal")
+        jl = row.get("Jedinica mere za lager - skidanje količine")
         c_pot = table.rows[r_idx].cells[4]
         c_pot.text = _format_qty_for_output(v, jl)
         _set_cell_center(c_pot)
         _wrap_cell(c_pot)
 
-        jl = row.get("Jedinica mere za lager - skidanje količine")
         c_jm = table.rows[r_idx].cells[5]
         c_jm.text = "" if pd.isna(jl) else str(jl)
         _set_cell_center(c_jm)
