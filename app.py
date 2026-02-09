@@ -84,6 +84,66 @@ def db_exec(sql: str, params=None) -> None:
         c.execute(text(sql), params or {})
 
 # =========================
+# DB MIGRATIONS (lightweight)
+# =========================
+def _ensure_invoice_columns():
+    try:
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS payment_purpose TEXT")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS invoice_note TEXT")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS fx_rate DOUBLE PRECISION")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS nbs_rate_services DOUBLE PRECISION")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS nbs_rate_services_date TEXT")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS nbs_rate_advance DOUBLE PRECISION")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS nbs_rate_advance_date TEXT")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS advance_invoice_id INTEGER")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS advance_applied_amount DOUBLE PRECISION")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS total_due DOUBLE PRECISION")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS situation_title TEXT")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS situation_period TEXT")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS object_desc TEXT")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS contract_value_eur DOUBLE PRECISION")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS works_place TEXT")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS base_contract_no TEXT")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS base_contract_date TEXT")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS add_contract_no TEXT")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS add_contract_date TEXT")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS cumulative_current_eur DOUBLE PRECISION")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS cumulative_prev_eur DOUBLE PRECISION")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS monthly_current_eur DOUBLE PRECISION")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS monthly_current_rsd DOUBLE PRECISION")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS advance_deduction_eur DOUBLE PRECISION")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS advance_deduction_rsd DOUBLE PRECISION")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS total_due_eur DOUBLE PRECISION")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS total_due_rsd DOUBLE PRECISION")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS vat_note_override TEXT")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS payment_currency_text TEXT")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS supervisor_name TEXT")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS receiver_name TEXT")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS receiver_title TEXT")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS supplier_name TEXT")
+        db_exec("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS supplier_title TEXT")
+        db_exec("ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS item_note TEXT")
+    except Exception:
+        # ako DB ne dozvoljava ALTER (npr. prava), nastavi bez prekida
+        pass
+
+_ensure_invoice_columns()
+
+def _get_or_create_advance_material_id() -> int:
+    row = db_df(
+        "SELECT material_id FROM materials WHERE LOWER(name)=LOWER(:n) LIMIT 1",
+        {"n": "AVANS"}
+    )
+    if not row.empty:
+        return int(row.iloc[0]["material_id"])
+    with engine.begin() as c:
+        mid = c.execute(
+            text("INSERT INTO materials(name, uom) VALUES (:n, :u) RETURNING material_id"),
+            {"n": "AVANS", "u": "kom"}
+        ).scalar()
+    return int(mid)
+
+# =========================
 # NUM HELPERS
 # =========================
 def _to_num(x, default=0.0) -> float:
@@ -104,6 +164,35 @@ def _fmt_rs_money(x: float) -> str:
 def _fmt_qty(x: float) -> str:
     s = f"{float(x):,.2f}"
     return s.replace(",", "X").replace(".", ",").replace("X", ".")
+INVOICE_TYPES = ["AVANSI", "PRODAJA MATERIJALA", "USLUGE", "PRIVREMENA SITUACIJA"]
+
+def _is_advance(t: str) -> bool:
+    return str(t).strip().upper() in {"ADVANCE", "AVANSI"}
+
+def _is_sale(t: str) -> bool:
+    return str(t).strip().upper() in {"FINAL", "PRODAJA MATERIJALA"}
+
+def _is_service(t: str) -> bool:
+    return str(t).strip().upper() == "USLUGE"
+
+def _is_temp_situation(t: str) -> bool:
+    return str(t).strip().upper() == "PRIVREMENA SITUACIJA"
+
+def build_service_lines(df_items: pd.DataFrame) -> pd.DataFrame:
+    out = df_items.copy()
+    out["name"] = out.get("name", "")
+    out["item_note"] = out.get("item_note", "")
+    out["uom"] = out.get("uom", "")
+    out["unit_price"] = out.get("unit_price", 0).apply(lambda v: _to_num(v, 0.0))
+    out["total_price"] = out.get("total_price", 0).apply(lambda v: _to_num(v, 0.0))
+    # ako nije unet total_price, koristi unit_price
+    out.loc[out["total_price"].isna() | (out["total_price"] == 0), "total_price"] = out["unit_price"]
+    out["line_net"] = out["total_price"]
+    out["line_vat"] = 0.0
+    out["line_gross"] = out["line_net"]
+    out["qty"] = 1.0
+    return out
+
 
 # =========================
 # VAT / TOTALS HELPERS
@@ -166,6 +255,23 @@ def generate_invoice_word_from_db(invoice_id: int) -> BytesIO:
             i.place_of_issue,                -- mesto izdavanja (ako postoji)
             i.place_of_supply,               -- mesto prometa (ako postoji)
             i.supply_date,                   -- datum prometa (ako postoji)
+            i.payment_purpose,
+            i.invoice_note,
+            i.fx_rate,
+            i.nbs_rate_services, i.nbs_rate_services_date,
+            i.nbs_rate_advance, i.nbs_rate_advance_date,
+            i.advance_applied_amount, i.invoice_type,
+            i.situation_title, i.situation_period, i.object_desc,
+            i.contract_value_eur, i.works_place,
+            i.base_contract_no, i.base_contract_date,
+            i.add_contract_no, i.add_contract_date,
+            i.cumulative_current_eur, i.cumulative_prev_eur,
+            i.monthly_current_eur, i.monthly_current_rsd,
+            i.advance_deduction_eur, i.advance_deduction_rsd,
+            i.total_due_eur, i.total_due_rsd,
+            i.vat_note_override, i.payment_currency_text,
+            i.supervisor_name, i.receiver_name, i.receiver_title,
+            i.supplier_name, i.supplier_title,
             c.name AS client_name,
             c.address AS client_address,
             c.city AS client_city
@@ -181,6 +287,7 @@ def generate_invoice_word_from_db(invoice_id: int) -> BytesIO:
         SELECT
             it.item_id,
             it.description,
+            it.item_note,
             it.qty,
             it.uom,
             COALESCE(it.unit_price,0) AS unit_price,
@@ -251,6 +358,84 @@ def generate_invoice_word_from_db(invoice_id: int) -> BytesIO:
     _set_cell_align(right, "left")
 
     doc.add_paragraph("")
+
+    # PRIVREMENA SITUACIJA (poseban layout)
+    if _is_temp_situation(inv.get("invoice_type")):
+        title = doc.add_paragraph(f"{inv.get('situation_title') or 'PRIVREMENA SITUACIJA'} (RAČUN BR. {inv.get('invoice_no','')})")
+        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = title.runs[0]
+        r.bold = True
+        r.font.size = Pt(14)
+
+        doc.add_paragraph("")
+
+        # Tabela 1
+        t1 = doc.add_table(rows=8, cols=2)
+        t1.style = "Table Grid"
+        rows = [
+            ("Radovi izvršeni do kraja meseca", inv.get("situation_period") or ""),
+            ("Na objektu", inv.get("object_desc") or ""),
+            ("Vrednost ugovorenih radova", f"{_fmt_rs_money(_to_num(inv.get('contract_value_eur'),0.0))} eur"),
+            (inv.get("vat_note_override") or "PDV se ne obračunava na osnovu člana 10, stav 2, tačka 3, Zakona o PDVu.", "0"),
+            ("Mesto gde se radovi izvode", inv.get("works_place") or ""),
+            ("Vrednost ispostavljene situacije za naplatu bez PDVa", f"{_fmt_rs_money(_to_num(inv.get('monthly_current_eur'),0.0))} eur"),
+            ("Broj osnovnog ugovora", f"{inv.get('base_contract_no') or ''} {('od ' + inv.get('base_contract_date')) if inv.get('base_contract_date') else ''}".strip()),
+            ("Broj dopunskog ugovora", f"{inv.get('add_contract_no') or '/'} {('od ' + inv.get('add_contract_date')) if inv.get('add_contract_date') else ''}".strip()),
+        ]
+        for i, (l, v) in enumerate(rows):
+            t1.cell(i, 0).text = l
+            t1.cell(i, 1).text = v
+
+        doc.add_paragraph("")
+
+        # Tabela 2
+        t2 = doc.add_table(rows=5, cols=3)
+        t2.style = "Table Grid"
+        t2.cell(0, 0).text = "1. KUMULATIV IZVRŠENIH RADOVA PO TEKUĆOJ SITUACIJI"
+        t2.cell(0, 1).text = f"{_fmt_rs_money(_to_num(inv.get('cumulative_current_eur'),0.0))} eur"
+        t2.cell(0, 2).text = ""
+
+        t2.cell(1, 0).text = "2. KUMULATIV IZVRŠENIH RADOVA PO PRETHODNOJ SITUACIJI"
+        t2.cell(1, 1).text = f"{_fmt_rs_money(_to_num(inv.get('cumulative_prev_eur'),0.0))} eur"
+        t2.cell(1, 2).text = ""
+
+        t2.cell(2, 0).text = "3. MESEČNO IZVRŠENI RADOVI PO TEKUĆOJ SITUACIJI (1-2)"
+        t2.cell(2, 1).text = f"{_fmt_rs_money(_to_num(inv.get('monthly_current_eur'),0.0))} eur"
+        t2.cell(2, 2).text = f"{_fmt_rs_money(_to_num(inv.get('monthly_current_rsd'),0.0))} din"
+
+        t2.cell(3, 0).text = "3. UMANJENJE PO OSNOVU AVANSA"
+        t2.cell(3, 1).text = f"{_fmt_rs_money(_to_num(inv.get('advance_deduction_eur'),0.0))} eur"
+        t2.cell(3, 2).text = f"{_fmt_rs_money(_to_num(inv.get('advance_deduction_rsd'),0.0))} rsd"
+
+        t2.cell(4, 0).text = "UKUPNO ZA NAPLATU PO OVOJ SITUACIJI:"
+        t2.cell(4, 1).text = f"{_fmt_rs_money(_to_num(inv.get('total_due_eur'),0.0))} eur"
+        t2.cell(4, 2).text = f"{_fmt_rs_money(_to_num(inv.get('total_due_rsd'),0.0))} rsd"
+
+        doc.add_paragraph("")
+        doc.add_paragraph(inv.get("vat_note_override") or "PDV se ne obračunava na osnovu člana 10, stav 2, tačka 3, Zakona o PDVu.")
+        if inv.get("nbs_rate_services"):
+            doc.add_paragraph(f"Za obračun radova primenjen srednji kurs NBS na dan {inv.get('nbs_rate_services_date') or ''}. {inv.get('nbs_rate_services')}")
+        if inv.get("nbs_rate_advance"):
+            doc.add_paragraph(f"Za obračun avansa primenjen srednji kurs NBS na dan {inv.get('nbs_rate_advance_date') or ''}. {inv.get('nbs_rate_advance')}")
+        if inv.get("issue_date"):
+            doc.add_paragraph(f"Datum izdavanja situacije: {inv.get('issue_date')}")
+        if inv.get("supply_date"):
+            doc.add_paragraph(f"Datum prometa dobara i usluga: {inv.get('supply_date')}")
+        if inv.get("payment_currency_text"):
+            doc.add_paragraph(f"Valuta plaćanja: {inv.get('payment_currency_text')}")
+
+        doc.add_paragraph("")
+        doc.add_paragraph("Nadzorni organ")
+        sig = doc.add_table(rows=2, cols=2)
+        sig.cell(0, 0).text = "Primalac dobara i usluga"
+        sig.cell(0, 1).text = "Ispručilac dobara i usluga"
+        sig.cell(1, 0).text = f"{inv.get('receiver_name') or ''}, {inv.get('receiver_title') or ''}".strip(", ")
+        sig.cell(1, 1).text = f"{inv.get('supplier_name') or ''}, {inv.get('supplier_title') or ''}".strip(", ")
+
+        bio = BytesIO()
+        doc.save(bio)
+        bio.seek(0)
+        return bio
 
     # meta info
     issue_date = inv.get("issue_date")
@@ -350,6 +535,10 @@ def generate_invoice_word_from_db(invoice_id: int) -> BytesIO:
     doc.add_paragraph(f"Paritet isporuke: {cs.get('delivery_parity') or '/'}")
     doc.add_paragraph(f"Napomena o poreskom oslobađanju: {cs.get('tax_note') or '/'}")
     doc.add_paragraph(cs.get("payment_note") or f"Uplatu izvršiti na tekući račun br.: {cs.get('bank_account') or ''}")
+    if inv.get("payment_purpose"):
+        doc.add_paragraph(f"Svrha uplate: {inv.get('payment_purpose')}")
+    if inv.get("invoice_note"):
+        doc.add_paragraph(f"Napomena: {inv.get('invoice_note')}")
 
     doc.add_paragraph("")
     sig = doc.add_paragraph(f"■ {cs.get('company_name') or 'LASER LUX'} ■ d.o.o.")
@@ -428,6 +617,62 @@ def build_invoice_pdf_preview(
     for line in comp_lines:
         c.drawString(right_x, yy2, str(line))
         yy2 -= 5 * mm
+
+    # PRIVREMENA SITUACIJA (preview)
+    if str(meta.get("invoice_type","")).upper() == "PRIVREMENA SITUACIJA":
+        y -= 10 * mm
+        c.setFont(SERB_FONT_NAME, 14)
+        c.drawCentredString(w / 2, y, f"{meta.get('situation_title') or 'PRIVREMENA SITUACIJA'} (RAČUN BR. {meta.get('invoice_no','')})")
+        y -= 10 * mm
+        c.setFont(SERB_FONT_NAME, 11)
+        lines = [
+            ("Radovi izvršeni do kraja meseca", meta.get("situation_period","")),
+            ("Na objektu", meta.get("object_desc","")),
+            ("Vrednost ugovorenih radova", f"{_fmt_rs_money(_to_num(meta.get('contract_value_eur'),0.0))} eur"),
+            ("PDV", "0"),
+            ("Mesto gde se radovi izvode", meta.get("works_place","")),
+            ("Vrednost ispostavljene situacije bez PDVa", f"{_fmt_rs_money(_to_num(meta.get('monthly_current_eur'),0.0))} eur"),
+            ("Broj osnovnog ugovora", meta.get("base_contract_no","")),
+            ("Broj dopunskog ugovora", meta.get("add_contract_no","")),
+        ]
+        for label, val in lines:
+            c.drawString(left_x, y, f"{label}: {val}")
+            y -= 6 * mm
+            if y < 40*mm:
+                c.showPage()
+                c.setFont(SERB_FONT_NAME, 11)
+                y = h - 20*mm
+
+        y -= 4 * mm
+        c.drawString(left_x, y, f"1) Kumulativ tekuća: {_fmt_rs_money(_to_num(meta.get('cumulative_current_eur'),0.0))} eur")
+        y -= 6 * mm
+        c.drawString(left_x, y, f"2) Kumulativ prethodna: {_fmt_rs_money(_to_num(meta.get('cumulative_prev_eur'),0.0))} eur")
+        y -= 6 * mm
+        c.drawString(left_x, y, f"3) Mesečno: {_fmt_rs_money(_to_num(meta.get('monthly_current_eur'),0.0))} eur / {_fmt_rs_money(_to_num(meta.get('monthly_current_rsd'),0.0))} din")
+        y -= 6 * mm
+        c.drawString(left_x, y, f"Umanjenje avansa: {_fmt_rs_money(_to_num(meta.get('advance_deduction_eur'),0.0))} eur / {_fmt_rs_money(_to_num(meta.get('advance_deduction_rsd'),0.0))} rsd")
+        y -= 6 * mm
+        c.drawString(left_x, y, f"Ukupno za naplatu: {_fmt_rs_money(_to_num(meta.get('total_due_eur'),0.0))} eur / {_fmt_rs_money(_to_num(meta.get('total_due_rsd'),0.0))} rsd")
+
+        y -= 8 * mm
+        c.drawString(left_x, y, meta.get("vat_note_override") or "")
+        y -= 6 * mm
+        if meta.get("nbs_rate_services"):
+            c.drawString(left_x, y, f"NBS (radovi): {meta.get('nbs_rate_services_date','')} {meta.get('nbs_rate_services')}")
+            y -= 6 * mm
+        if meta.get("nbs_rate_advance"):
+            c.drawString(left_x, y, f"NBS (avans): {meta.get('nbs_rate_advance_date','')} {meta.get('nbs_rate_advance')}")
+            y -= 6 * mm
+        c.drawString(left_x, y, f"Datum izdavanja: {meta.get('issue_date_str','')}")
+        y -= 6 * mm
+        c.drawString(left_x, y, f"Datum prometa: {meta.get('supply_date_str','')}")
+        y -= 6 * mm
+        c.drawString(left_x, y, f"Valuta plaćanja: {meta.get('payment_currency_text') or ''}")
+
+        c.showPage()
+        c.save()
+        buf.seek(0)
+        return buf
 
     y = min(yy, yy2) - 8 * mm
 
@@ -524,6 +769,21 @@ def build_invoice_pdf_preview(
     c.drawString(left_x, y, f"Napomena o poreskom oslobađanju: {company_block.get('tax_note') or '/'}")
     y -= 6*mm
     c.drawString(left_x, y, company_block.get("payment_note") or "")
+    if meta.get("nbs_rate_services"):
+        y -= 6*mm
+        c.drawString(left_x, y, f"Za obra?un radova primenjen srednji kurs NBS na dan {meta.get("nbs_rate_services_date") or ""}. {meta.get("nbs_rate_services")}")
+    if meta.get("nbs_rate_advance"):
+        y -= 6*mm
+        c.drawString(left_x, y, f"Za obra?un avansa primenjen srednji kurs NBS na dan {meta.get("nbs_rate_advance_date") or ""}. {meta.get("nbs_rate_advance")}")
+    if meta.get("advance_applied_amount"):
+        y -= 6*mm
+        c.drawString(left_x, y, f"Umanjenje po avansu: {_fmt_rs_money(_to_num(meta.get("advance_applied_amount"),0.0))} {currency}")
+    if meta.get("payment_purpose"):
+        y -= 6*mm
+        c.drawString(left_x, y, f"Svrha uplate: {meta.get('payment_purpose')}")
+    if meta.get("invoice_note"):
+        y -= 6*mm
+        c.drawString(left_x, y, f"Napomena: {meta.get('invoice_note')}")
     y -= 10*mm
     c.drawRightString(w - 20*mm, y, f"■ {company_block.get('company_name') or 'LASER LUX'} ■ d.o.o.")
 
@@ -750,6 +1010,41 @@ with tabs[0]:
 
     materials = db_df("SELECT material_id, name, uom FROM materials ORDER BY name")
 
+
+    with st.expander("? Dodaj novi materijal", expanded=False):
+        new_mat_name = st.text_input("Naziv materijala", value="")
+        new_mat_uom = st.text_input("JM (lager)", value="")
+        new_mat_desc = st.text_input("Opis materijala (opciono)", value="")
+        new_mat_norm = st.text_input("Normativ (opciono)", value="")
+        if st.button("Sa?uvaj materijal", key="add_material_btn"):
+            if not new_mat_name.strip():
+                st.error("Unesi naziv materijala.")
+            else:
+                try:
+                    with engine.begin() as c:
+                        try:
+                            c.execute(text("""
+                                INSERT INTO materials(name, uom, opis_materijala, tech_normative)
+                                VALUES (:n, :u, :d, :t)
+                            """), {
+                                "n": new_mat_name.strip(),
+                                "u": new_mat_uom.strip() or None,
+                                "d": new_mat_desc.strip() or None,
+                                "t": new_mat_norm.strip() or None,
+                            })
+                        except Exception:
+                            c.execute(text("""
+                                INSERT INTO materials(name, uom)
+                                VALUES (:n, :u)
+                            """), {
+                                "n": new_mat_name.strip(),
+                                "u": new_mat_uom.strip() or None,
+                            })
+                    st.success("Materijal dodat ?")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Gre?ka pri upisu: {e}")
+
     if clients.empty or materials.empty:
         st.warning("Nema klijenata ili materijala u bazi.")
     else:
@@ -758,6 +1053,8 @@ with tabs[0]:
                 columns=["material_id", "qty", "uom", "unit_price", "discount", "description"]
             )
         
+
+        inv_type = st.selectbox("Tip računa", INVOICE_TYPES, key="inv_type_outside")
 
         with st.form("new_invoice_form", clear_on_submit=False):
             col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
@@ -774,67 +1071,216 @@ with tabs[0]:
                     {"id": int(client_id)}
                 ).iloc[0].to_dict()
 
-                
-
             with col2:
-                inv_type = st.selectbox("Tip računa", ["ADVANCE", "FINAL"])
+                invoice_no = st.text_input("Broj ra?una")
             with col3:
-                invoice_no = st.text_input("Broj računa")
-            with col4:
                 issue_date = st.date_input("Datum", value=date.today())
-
-            m1, m2, m3, m4 = st.columns([1, 1, 1, 1])
-            with m1:
-                vat_percent = st.number_input("PDV (%)", min_value=0.0, max_value=50.0, value=20.0, step=1.0)
-            with m2:
-                currency = st.selectbox("Valuta", ["RSD", "EUR"], index=0)
-            with m3:
-                due_date = st.date_input("Rok plaćanja", value=issue_date)
-            with m4:
+            with col4:
                 delivery_note_no = st.text_input("Broj otpremnice", value="")
 
-            m5, m6 = st.columns(2)
-            with m5:
+            r1, r2, r3, r4 = st.columns(4)
+            with r1:
+                vat_percent = st.number_input("PDV (%)", min_value=0.0, max_value=50.0, value=20.0, step=1.0)
+            with r2:
+                currency = st.selectbox("Valuta", ["RSD", "EUR"], index=0)
+            with r3:
+                due_date = st.date_input("Rok pla?anja", value=issue_date)
+            with r4:
                 place_of_issue = st.text_input("Mesto izdavanja", value="Beograd")
-            with m6:
+
+            r5, r6, r7, r8 = st.columns(4)
+            with r5:
                 place_of_supply = st.text_input("Mesto prometa", value="Beograd")
+            with r6:
+                supply_date = st.date_input("Datum prometa", value=issue_date)
+            with r7:
+                fx_rate = st.number_input("Kurs EUR (RSD/EUR)", min_value=0.0, value=0.0, step=0.0001)
+            with r8:
+                nbs_rate_services_date = st.text_input("Datum kursa NBS (radovi)", value="")
 
-            supply_date = st.date_input("Datum prometa", value=issue_date)
+            r9, r10, r11, r12 = st.columns(4)
+            with r9:
+                nbs_rate_services = st.number_input("Kurs NBS za radove", min_value=0.0, value=0.0, step=0.0001)
+            with r10:
+                nbs_rate_advance_date = st.text_input("Datum kursa NBS (avans)", value="")
+            with r11:
+                nbs_rate_advance = st.number_input("Kurs NBS za avans", min_value=0.0, value=0.0, step=0.0001)
+            with r12:
+                adv_list = db_df("""
+                    SELECT invoice_id, invoice_no, total_gross
+                    FROM invoices
+                    WHERE invoice_type IN ('ADVANCE','AVANSI')
+                    ORDER BY invoice_id DESC
+                    LIMIT 200
+                """)
+                adv_pick = st.selectbox(
+                    "Pove?i avansni ra?un (opciono)",
+                    adv_list["invoice_id"].tolist() if not adv_list.empty else [],
+                    format_func=lambda x: f"{adv_list.loc[adv_list.invoice_id==x,'invoice_no'].iloc[0]} | {adv_list.loc[adv_list.invoice_id==x,'total_gross'].iloc[0]:.2f}" if x in adv_list["invoice_id"].values else str(x),
+                    index=0 if not adv_list.empty else None,
+                ) if not adv_list.empty else None
 
-            st.markdown("### Stavke")
+            r13, r14, r15, r16 = st.columns(4)
+            with r13:
+                advance_applied_amount = st.number_input("Iznos avansa za umanjenje", min_value=0.0, value=0.0, step=1.0)
+            with r14:
+                payment_purpose = st.text_input("Svrha uplate", value="", key="payment_purpose_input")
+            with r15:
+                invoice_note = st.text_input("Napomena", value="", key="invoice_note_input")
+            with r16:
+                st.markdown(" ")
 
-            df_new = st.data_editor(
-                st.session_state["new_items"],
-                num_rows="dynamic",
-                use_container_width=True,
-                key="new_items_editor",
-                column_config={
-                    "material_id": st.column_config.SelectboxColumn(
-                        "Materijal",
-                        options=materials["material_id"].tolist(),
-                        format_func=lambda x: materials.loc[materials["material_id"] == x, "name"].iloc[0]
-                        if x in materials["material_id"].values else str(x),
-                    ),
-                    "qty": st.column_config.NumberColumn("Količina"),
-                    "uom": st.column_config.TextColumn("JM (fakt)"),
-                    "unit_price": st.column_config.NumberColumn("Jed.cena"),
-                    "discount": st.column_config.NumberColumn("Popust (RSD)"),
-                    "description": st.column_config.TextColumn("Opis (opciono)"),
-                },
-            )
+            # defaults for privremena fields
+            situation_title = ""
+            situation_period = ""
+            object_desc = ""
+            contract_value_eur = 0.0
+            works_place = ""
+            base_contract_no = ""
+            base_contract_date = ""
+            add_contract_no = ""
+            add_contract_date = ""
+            cumulative_current_eur = 0.0
+            cumulative_prev_eur = 0.0
+            monthly_current_eur = 0.0
+            monthly_current_rsd = 0.0
+            advance_deduction_eur = 0.0
+            advance_deduction_rsd = 0.0
+            total_due_eur = 0.0
+            total_due_rsd = 0.0
+            vat_note_override = ""
+            payment_currency_text = ""
+            supervisor_name = ""
+            receiver_name = ""
+            receiver_title = ""
+            supplier_name = ""
+            supplier_title = ""
 
-            # autopopuni
-            for idx, row in df_new.iterrows():
-                mid = row.get("material_id")
-                if pd.notna(mid) and mid in materials["material_id"].values:
-                    if pd.isna(row.get("uom")) or str(row.get("uom")).strip() == "":
-                        df_new.at[idx, "uom"] = materials.loc[materials["material_id"] == mid, "uom"].iloc[0]
-                    if pd.isna(row.get("description")) or str(row.get("description")).strip() == "":
-                        df_new.at[idx, "description"] = materials.loc[materials["material_id"] == mid, "name"].iloc[0]
-                if pd.isna(row.get("discount")):
-                    df_new.at[idx, "discount"] = 0
+            inv_type_local = st.session_state.get("inv_type_outside", inv_type)
 
-            st.session_state["new_items"] = df_new
+            # PRIVREMENA SITUACIJA polja (ručni unos)
+            if _is_temp_situation(inv_type_local):
+                st.markdown("### Privremena situacija")
+                ps1, ps2, ps3, ps4 = st.columns(4)
+                with ps1:
+                    situation_title = st.text_input("Naziv situacije", value="PRIVREMENA SITUACIJA")
+                    situation_period = st.text_input("Period", value="")
+                    works_place = st.text_input("Mesto izvođenja radova", value="")
+                with ps2:
+                    contract_value_eur = st.number_input("Vrednost ugovorenih radova (EUR)", min_value=0.0, value=0.0, step=1.0)
+                    base_contract_no = st.text_input("Broj osnovnog ugovora", value="")
+                    base_contract_date = st.text_input("Datum osnovnog ugovora", value="")
+                with ps3:
+                    cumulative_current_eur = st.number_input("1. Kumulativ po tekućoj situaciji (EUR)", min_value=0.0, value=0.0, step=1.0)
+                    cumulative_prev_eur = st.number_input("2. Kumulativ po prethodnoj situaciji (EUR)", min_value=0.0, value=0.0, step=1.0)
+                    monthly_current_eur = st.number_input("3. Mesečno po tekućoj situaciji (EUR)", min_value=0.0, value=0.0, step=1.0)
+                with ps4:
+                    advance_deduction_eur = st.number_input("Umanjenje po avansu (EUR)", min_value=0.0, value=0.0, step=1.0)
+                    total_due_eur = st.number_input("Ukupno za naplatu (EUR)", min_value=0.0, value=0.0, step=1.0)
+                    payment_currency_text = st.text_input("Valuta plaćanja", value="Prema ugovoru")
+
+                object_desc = st.text_area("Na objektu", value="", height=80)
+                add_contract_no = st.text_input("Broj dopunskog ugovora", value="/")
+                add_contract_date = st.text_input("Datum dopunskog ugovora", value="")
+                vat_note_override = st.text_input("Napomena za PDV", value="PDV se ne obračunava na osnovu člana 10, stav 2, tačka 3, Zakona o PDVu.")
+
+                # RSD preračun iz EUR * kurs
+                monthly_current_rsd = round(float(monthly_current_eur or 0.0) * float(fx_rate or 0.0), 2)
+                advance_deduction_rsd = round(float(advance_deduction_eur or 0.0) * float(fx_rate or 0.0), 2)
+                total_due_rsd = round(float(total_due_eur or 0.0) * float(fx_rate or 0.0), 2)
+
+                st.write(f"Mesečno (RSD): {monthly_current_rsd:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+                st.write(f"Umanjenje avansa (RSD): {advance_deduction_rsd:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+                st.write(f"Ukupno za naplatu (RSD): {total_due_rsd:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+
+                s1, s2, s3, s4 = st.columns(4)
+                with s1:
+                    supervisor_name = st.text_input("Nadzorni organ", value="")
+                with s2:
+                    receiver_name = st.text_input("Primalac (ime)", value="")
+                    receiver_title = st.text_input("Primalac (funkcija)", value="")
+                with s3:
+                    supplier_name = st.text_input("Ispručilac (ime)", value="")
+                    supplier_title = st.text_input("Ispručilac (funkcija)", value="")
+                with s4:
+                    st.markdown(" ")
+            advance_amount = None
+            service_items = None
+
+            if _is_advance(inv_type_local):
+                st.markdown("### Avans")
+                advance_amount = st.number_input("Iznos avansa", min_value=0.0, value=0.0, step=1.0)
+            elif _is_service(inv_type_local):
+                st.markdown("### Usluge")
+                if "service_items" not in st.session_state:
+                    st.session_state["service_items"] = pd.DataFrame(
+                        columns=["material_id", "name", "item_note", "uom", "unit_price", "total_price"]
+                    )
+                service_items = st.data_editor(
+                    st.session_state["service_items"],
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    key="service_items_editor",
+                    column_config={
+                        "material_id": st.column_config.SelectboxColumn(
+                            "Ime proizvoda",
+                            options=materials["material_id"].tolist(),
+                            format_func=lambda x: materials.loc[materials["material_id"] == x, "name"].iloc[0]
+                            if x in materials["material_id"].values else str(x),
+                        ),
+                        "name": st.column_config.TextColumn("Ime proizvoda (ručno)"),
+                        "item_note": st.column_config.TextColumn("Opis"),
+                        "uom": st.column_config.TextColumn("Jedinica mere"),
+                        "unit_price": st.column_config.NumberColumn("Jedinicna cena"),
+                        "total_price": st.column_config.NumberColumn("Ukupna cena"),
+                    },
+                )
+                # autopopuni name/uom iz baze ako je izabran materijal
+                for idx, row in service_items.iterrows():
+                    mid = row.get("material_id")
+                    if pd.notna(mid) and mid in materials["material_id"].values:
+                        if pd.isna(row.get("name")) or str(row.get("name")).strip() == "":
+                            service_items.at[idx, "name"] = materials.loc[materials["material_id"] == mid, "name"].iloc[0]
+                        if pd.isna(row.get("uom")) or str(row.get("uom")).strip() == "":
+                            service_items.at[idx, "uom"] = materials.loc[materials["material_id"] == mid, "uom"].iloc[0]
+                st.session_state["service_items"] = service_items
+            elif _is_temp_situation(inv_type_local):
+                st.info("Privremena situacija nema stavke materijala.")
+            else:
+                st.markdown("### Stavke")
+
+                df_new = st.data_editor(
+                    st.session_state["new_items"],
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    key="new_items_editor",
+                    column_config={
+                        "material_id": st.column_config.SelectboxColumn(
+                            "Materijal",
+                            options=materials["material_id"].tolist(),
+                            format_func=lambda x: materials.loc[materials["material_id"] == x, "name"].iloc[0]
+                            if x in materials["material_id"].values else str(x),
+                        ),
+                        "qty": st.column_config.NumberColumn("Koli?ina"),
+                        "uom": st.column_config.TextColumn("JM (fakt)"),
+                        "unit_price": st.column_config.NumberColumn("Jed.cena"),
+                        "discount": st.column_config.NumberColumn("Popust (RSD)"),
+                        "description": st.column_config.TextColumn("Opis (opciono)"),
+                    },
+                )
+
+                # autopopuni
+                for idx, row in df_new.iterrows():
+                    mid = row.get("material_id")
+                    if pd.notna(mid) and mid in materials["material_id"].values:
+                        if pd.isna(row.get("uom")) or str(row.get("uom")).strip() == "":
+                            df_new.at[idx, "uom"] = materials.loc[materials["material_id"] == mid, "uom"].iloc[0]
+                        if pd.isna(row.get("description")) or str(row.get("description")).strip() == "":
+                            df_new.at[idx, "description"] = materials.loc[materials["material_id"] == mid, "name"].iloc[0]
+                    if pd.isna(row.get("discount")):
+                        df_new.at[idx, "discount"] = 0
+
+                st.session_state["new_items"] = df_new
 
             do_preview = st.form_submit_button("👀 Preview (kao štampa)")
             do_save = st.form_submit_button("💾 Sačuvaj u bazu")
@@ -845,10 +1291,46 @@ with tabs[0]:
 
         # Preview PDF (u expanderu) + download PDF
         if do_preview:
-            work = df_new.copy()
-            work = work[work["material_id"].notna() & work["qty"].notna()].copy()
-            if work.empty:
-                st.error("Dodaj bar jednu stavku (materijal + količina).")
+            inv_type_local = st.session_state.get("inv_type_outside", inv_type)
+            if _is_temp_situation(inv_type_local):
+                work = pd.DataFrame()
+                lines = pd.DataFrame()
+                totals = {
+                    "total_net": float(total_due_eur or 0.0),
+                    "total_vat": 0.0,
+                    "total_gross": float(total_due_eur or 0.0),
+                }
+            elif _is_advance(inv_type_local):
+                if advance_amount is None or float(advance_amount) <= 0:
+                    st.error("Unesi iznos avansa.")
+                    work = pd.DataFrame()
+                else:
+                    mid = _get_or_create_advance_material_id()
+                    work = pd.DataFrame([{
+                        "material_id": mid,
+                        "qty": 1,
+                        "uom": currency,
+                        "unit_price": float(advance_amount),
+                        "discount": 0.0,
+                        "description": "AVANS"
+                    }])
+            elif _is_service(inv_type_local):
+                work = st.session_state.get("service_items", pd.DataFrame()).copy()
+                work = work[work["name"].notna()].copy() if not work.empty else work
+                if work.empty:
+                    st.error("Dodaj bar jednu stavku usluge.")
+                else:
+                    work = build_service_lines(work)
+            else:
+                work = df_new.copy()
+                work = work[work["material_id"].notna() & work["qty"].notna()].copy()
+                if work.empty:
+                    st.error("Dodaj bar jednu stavku (materijal + koli?ina).")
+
+            if _is_temp_situation(inv_type_local):
+                pass
+            elif work.empty:
+                pass
             else:
                 vat_rate = float(vat_percent) / 100.0
                 work["unit_price"] = work.get("unit_price", 0).fillna(0)
@@ -867,6 +1349,41 @@ with tabs[0]:
                     "delivery_note_no": delivery_note_no.strip() or None,
                     "place_of_supply": place_of_supply,
                     "supply_date_str": supply_date.strftime("%d.%m.%Y.") if supply_date else "",
+
+                    
+                    "invoice_type": inv_type_local,
+                    "fx_rate": fx_rate,
+                    "nbs_rate_services": nbs_rate_services,
+                    "nbs_rate_services_date": nbs_rate_services_date,
+                    "nbs_rate_advance": nbs_rate_advance,
+                    "nbs_rate_advance_date": nbs_rate_advance_date,
+                    "advance_applied_amount": advance_applied_amount,
+                    "situation_title": situation_title,
+                    "situation_period": situation_period,
+                    "object_desc": object_desc,
+                    "contract_value_eur": contract_value_eur,
+                    "works_place": works_place,
+                    "base_contract_no": base_contract_no,
+                    "base_contract_date": base_contract_date,
+                    "add_contract_no": add_contract_no,
+                    "add_contract_date": add_contract_date,
+                    "cumulative_current_eur": cumulative_current_eur,
+                    "cumulative_prev_eur": cumulative_prev_eur,
+                    "monthly_current_eur": monthly_current_eur,
+                    "monthly_current_rsd": monthly_current_rsd,
+                    "advance_deduction_eur": advance_deduction_eur,
+                    "advance_deduction_rsd": advance_deduction_rsd,
+                    "total_due_eur": total_due_eur,
+                    "total_due_rsd": total_due_rsd,
+                    "vat_note_override": vat_note_override,
+                    "payment_currency_text": payment_currency_text,
+                    "supervisor_name": supervisor_name,
+                    "receiver_name": receiver_name,
+                    "receiver_title": receiver_title,
+                    "supplier_name": supplier_name,
+                    "supplier_title": supplier_title,
+                    "payment_purpose": payment_purpose.strip() or None,
+                    "invoice_note": invoice_note.strip() or None,
                 }
 
                 pdf_buf = build_invoice_pdf_preview(
@@ -903,10 +1420,46 @@ with tabs[0]:
             if not str(invoice_no).strip():
                 st.error("Unesi broj računa.")
             else:
-                work = df_new.copy()
-                work = work[work["material_id"].notna() & work["qty"].notna()].copy()
-                if work.empty:
-                    st.error("Dodaj bar jednu stavku (materijal + količina).")
+                inv_type_local = st.session_state.get("inv_type_outside", inv_type)
+                if _is_temp_situation(inv_type_local):
+                    work = pd.DataFrame()
+                    lines = pd.DataFrame()
+                    totals = {
+                        "total_net": float(total_due_eur or 0.0),
+                        "total_vat": 0.0,
+                        "total_gross": float(total_due_eur or 0.0),
+                    }
+                elif _is_advance(inv_type_local):
+                    if advance_amount is None or float(advance_amount) <= 0:
+                        st.error("Unesi iznos avansa.")
+                        work = pd.DataFrame()
+                    else:
+                        mid = _get_or_create_advance_material_id()
+                        work = pd.DataFrame([{
+                            "material_id": mid,
+                            "qty": 1,
+                            "uom": currency,
+                            "unit_price": float(advance_amount),
+                            "discount": 0.0,
+                            "description": "AVANS"
+                        }])
+                elif _is_service(inv_type_local):
+                    work = st.session_state.get("service_items", pd.DataFrame()).copy()
+                    work = work[work["name"].notna()].copy() if not work.empty else work
+                    if work.empty:
+                        st.error("Dodaj bar jednu stavku usluge.")
+                    else:
+                        work = build_service_lines(work)
+                else:
+                    work = df_new.copy()
+                    work = work[work["material_id"].notna() & work["qty"].notna()].copy()
+                    if work.empty:
+                        st.error("Dodaj bar jednu stavku (materijal + koli?ina).")
+
+                if _is_temp_situation(inv_type_local):
+                    pass
+                elif work.empty:
+                    pass
                 else:
                     vat_rate = float(vat_percent) / 100.0
                     work["unit_price"] = work.get("unit_price", 0).fillna(0)
@@ -920,13 +1473,41 @@ with tabs[0]:
                                 invoice_no, invoice_type, status, client_id,
                                 issue_date, due_date, currency, vat_rate,
                                 total_net, total_vat, total_gross,
-                                delivery_note_no, place_of_issue, place_of_supply, supply_date
+                                delivery_note_no, place_of_issue, place_of_supply, supply_date,
+                                payment_purpose, invoice_note,
+                                fx_rate, nbs_rate_services, nbs_rate_services_date,
+                                nbs_rate_advance, nbs_rate_advance_date,
+                                advance_invoice_id, advance_applied_amount, total_due,
+                                situation_title, situation_period, object_desc, contract_value_eur,
+                                works_place, base_contract_no, base_contract_date,
+                                add_contract_no, add_contract_date,
+                                cumulative_current_eur, cumulative_prev_eur,
+                                monthly_current_eur, monthly_current_rsd,
+                                advance_deduction_eur, advance_deduction_rsd,
+                                total_due_eur, total_due_rsd,
+                                vat_note_override, payment_currency_text,
+                                supervisor_name, receiver_name, receiver_title,
+                                supplier_name, supplier_title
                             )
                             VALUES (
                                 :no, :t, 'DRAFT', :cid,
                                 :issue, :due, :cur, :vr,
                                 :tn, :tv, :tg,
-                                :dn, :pio, :ps, :sd
+                                :dn, :pio, :ps, :sd,
+                                :pp, :note,
+                                :fx, :nbs_s, :nbs_sd,
+                                :nbs_a, :nbs_ad,
+                                :adv_id, :adv_amt, :due,
+                                :sit_title, :sit_period, :obj_desc, :contract_eur,
+                                :works_place, :base_no, :base_date,
+                                :add_no, :add_date,
+                                :cum_cur, :cum_prev,
+                                :mon_cur, :mon_cur_rsd,
+                                :adv_ded, :adv_ded_rsd,
+                                :due_eur, :due_rsd,
+                                :vat_note, :pay_curr,
+                                :supervisor, :recv_name, :recv_title,
+                                :supp_name, :supp_title
                             )
                             RETURNING invoice_id
                         """), {
@@ -944,24 +1525,59 @@ with tabs[0]:
                             "pio": place_of_issue.strip() or None,
                             "ps": place_of_supply.strip() or None,
                             "sd": supply_date,
+                            "pp": payment_purpose.strip() or None,
+                            "note": invoice_note.strip() or None,
+                            "fx": fx_rate or None,
+                            "nbs_s": nbs_rate_services or None,
+                            "nbs_sd": nbs_rate_services_date.strip() or None,
+                            "nbs_a": nbs_rate_advance or None,
+                            "nbs_ad": nbs_rate_advance_date.strip() or None,
+                            "adv_id": int(adv_pick) if adv_pick else None,
+                            "adv_amt": float(advance_applied_amount or 0.0),
+                            "due": None,
+                            "sit_title": situation_title or None,
+                            "sit_period": situation_period or None,
+                            "obj_desc": object_desc or None,
+                            "contract_eur": float(contract_value_eur or 0.0),
+                            "works_place": works_place or None,
+                            "base_no": base_contract_no or None,
+                            "base_date": base_contract_date or None,
+                            "add_no": add_contract_no or None,
+                            "add_date": add_contract_date or None,
+                            "cum_cur": float(cumulative_current_eur or 0.0),
+                            "cum_prev": float(cumulative_prev_eur or 0.0),
+                            "mon_cur": float(monthly_current_eur or 0.0),
+                            "mon_cur_rsd": float(monthly_current_rsd or 0.0),
+                            "adv_ded": float(advance_deduction_eur or 0.0),
+                            "adv_ded_rsd": float(advance_deduction_rsd or 0.0),
+                            "due_eur": float(total_due_eur or 0.0),
+                            "due_rsd": float(total_due_rsd or 0.0),
+                            "vat_note": vat_note_override or None,
+                            "pay_curr": payment_currency_text or None,
+                            "supervisor": supervisor_name or None,
+                            "recv_name": receiver_name or None,
+                            "recv_title": receiver_title or None,
+                            "supp_name": supplier_name or None,
+                            "supp_title": supplier_title or None,
                         }).scalar()
 
                         for _, r in lines.iterrows():
                             c.execute(text("""
                                 INSERT INTO invoice_items(
-                                    invoice_id, material_id, description, qty, uom,
+                                    invoice_id, material_id, description, item_note, qty, uom,
                                     unit_price, discount,
                                     line_net, line_vat, line_gross
                                 )
                                 VALUES (
-                                    :iid, :mid, :desc, :qty, :uom,
+                                    :iid, :mid, :desc, :note, :qty, :uom,
                                     :up, :disc,
                                     :ln, :lv, :lg
                                 )
                             """), {
                                 "iid": int(inv_id),
                                 "mid": int(r["material_id"]),
-                                "desc": str(r.get("description") or ""),
+                                "desc": str(r.get("description") or r.get("name") or ""),
+                                "note": str(r.get("item_note") or ""),
                                 "qty": float(_to_num(r.get("qty"), 0.0)),
                                 "uom": str(r.get("uom") or ""),
                                 "up": float(_to_num(r.get("unit_price"), 0.0)),
@@ -1218,7 +1834,7 @@ with tabs[2]:
             )
 
             meta = inv_pick.loc[inv_pick["invoice_id"] == inv_id].iloc[0]
-            is_final = meta["invoice_type"] == "FINAL"
+            is_final = str(meta["invoice_type"]).upper() in ("FINAL","PRODAJA MATERIJALA")
             posted = bool(meta.get("stock_posted"))
 
             cA, cB, cC = st.columns([1, 1, 2])
