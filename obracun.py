@@ -108,6 +108,22 @@ def _seek0(f):
     except Exception:
         pass
 
+def _remove_table_borders(table):
+    tbl = table._tbl
+    tblPr = tbl.tblPr
+    tblBorders = tblPr.first_child_found_in("w:tblBorders")
+    if tblBorders is None:
+        tblBorders = OxmlElement("w:tblBorders")
+        tblPr.append(tblBorders)
+
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        tag = "w:{}".format(edge)
+        element = tblBorders.find(qn(tag))
+        if element is None:
+            element = OxmlElement(tag)
+            tblBorders.append(element)
+        element.set(qn("w:val"), "nil")
+
 def read_excel_safe(xlsx_file, **kwargs):
     _seek0(xlsx_file)
     return pd.read_excel(xlsx_file, **kwargs)
@@ -1075,6 +1091,12 @@ def procesiraj_obracun(lager_file, fakture_file, magacin_file=None, edited_rules
     col_norm_qty = "Količina za fakturisanje (ono što piše u tabeli za račune - Normative)"
     col_norm_jm_dash = "Jedinica mere za fakturisanje – u računu"
     col_norm_jm_hyph = "Jedinica mere za fakturisanje - u računu"
+    # U exportu: ova kolona treba da prikazuje JM za skidanje sa lagera
+    if "Jedinica mere za lager - skidanje količine" in df_posle.columns:
+        if col_norm_jm_dash in df_posle.columns:
+            df_posle[col_norm_jm_dash] = df_posle["Jedinica mere za lager - skidanje količine"]
+        if col_norm_jm_hyph in df_posle.columns:
+            df_posle[col_norm_jm_hyph] = df_posle["Jedinica mere za lager - skidanje količine"]
     if col_norm_qty in df_posle.columns:
         if col_norm_jm_dash in df_posle.columns:
             df_posle[col_norm_qty] = _round_qty_by_unit(df_posle[col_norm_qty], df_posle[col_norm_jm_dash])
@@ -1320,17 +1342,41 @@ def generate_word_for_racun(df_fakture_posle, broj_racuna):
 
     doc.add_paragraph("")
 
-    # PO RAČUNU BROJ (bold)
-    p1 = doc.add_paragraph()
-    r1 = p1.add_run(f"PO RAČUNU BROJ: {broj_racuna}")
-    _style_run(r1, bold=True)
+    # ------------------------------------------------------
+    # INFO TABELA (PO RAČUNU / KLIJENT) – bez ivica
+    # ------------------------------------------------------
+    info_table = doc.add_table(rows=2, cols=2)
+    info_table.alignment = WD_TABLE_ALIGNMENT.LEFT
+    info_table.autofit = False
 
-    # KLIJENT (bold)
-    p2 = doc.add_paragraph()
-    r2a = p2.add_run("KLIJENT:\t\t     ")
-    _style_run(r2a, bold=True)
-    r2b = p2.add_run(f"{client_name}")
-    _style_run(r2b, bold=True)
+    _set_table_fixed_layout(info_table)
+    _set_col_widths(info_table, [4.5, 12.68])  # ukupno 17.18 cm
+
+    # red 1
+    c00 = info_table.cell(0, 0)
+    c01 = info_table.cell(0, 1)
+    c00.text = "PO RAČUNU BROJ:"
+    c01.text = str(broj_racuna)
+    _set_cell_left(c00); _wrap_cell(c00)
+    _set_cell_left(c01); _wrap_cell(c01)
+    for r in c00.paragraphs[0].runs:
+        _style_run(r, bold=True)
+    for r in c01.paragraphs[0].runs:
+        _style_run(r, bold=True)
+
+    # red 2
+    c10 = info_table.cell(1, 0)
+    c11 = info_table.cell(1, 1)
+    c10.text = "KLIJENT:"
+    c11.text = client_name
+    _set_cell_left(c10); _wrap_cell(c10)
+    _set_cell_left(c11); _wrap_cell(c11)
+    for r in c10.paragraphs[0].runs:
+        _style_run(r, bold=True)
+    for r in c11.paragraphs[0].runs:
+        _style_run(r, bold=True)
+
+    _remove_table_borders(info_table)
 
     doc.add_paragraph("")
 
